@@ -22,6 +22,8 @@ module pixel_packer (
         is_write  = 1'b0;
         shift     = 5'd0;
         mask      = 16'hFFFF;
+    
+        $display("PPW: fmt=%d pos=%d word=%h pixel_in=%h", fmt, pos, word, pixel_in);
 
         case (fmt)
             3'd0: begin // 1 bpp: 16 pixels per word; pos 0 = bit 15

@@ -3,14 +3,28 @@ module top (
     input  logic clk,
     input  logic rst,
     output logic halted,
-    output logic error
+    output logic error,
+
+    output logic        gpu_req,
+    output logic        gpu_we,
+    output logic [23:0] gpu_addr,
+    output logic [15:0] gpu_wdata,
+    output logic [1:0]  gpu_sel,
+    input  logic        gpu_ack0,
+    input  logic        gpu_ack1,
+    input  logic [15:0] gpu_rdata,
+    input  logic        rom_we,
+    input  logic [11:0] rom_addr,
+    input  logic [31:0] rom_wdata,
+    input  logic        start
 );
 
     // ===== microcode ROM =====
     logic [11:0] pc;
     logic [31:0] insn;
     microcode_rom #(.DEPTH(4096), .INIT_FILE("")) rom (
-        .addr(pc), .data(insn)
+        .clk(clk), .addr(pc), .data(insn),
+        .we(rom_we), .waddr(rom_addr), .wdata(rom_wdata)
     );
 
     // ===== unpack instruction =====
@@ -58,36 +72,55 @@ module top (
         .res(alu_res), .z(alu_z), .n(alu_n), .c(alu_c), .v(alu_v)
     );
 
+    // ===== FSM type (declared early so stall can use it) =====
+    typedef enum logic [1:0] {
+        FSM_IDLE, FSM_MEM_REQ, FSM_MEM_WAIT, FSM_WRITE
+    } fsm_t;
+    fsm_t fsm;
+
+    logic [1:0]  op_ch;
+    logic [5:0]  op_code;
+    logic [15:0] op_pix;
+    
+    logic        stall;
+    assign stall = (fsm != FSM_IDLE) || pb_wb_req;
+
+    // ===== loop_we/loop_in =====
+    logic        loop_we;
+    logic [23:0] loop_in;
+    assign loop_we = 1'b0;
+    assign loop_in = 24'h0;
+
     // ===== sequencer =====
     logic [11:0] pc_next, error_code;
     logic [15:0] shadow;
     logic [23:0] loop_reg;
     sequencer seq (
-        .clk(clk), .rst(rst),
+        .clk(clk), .rst(rst), .start(start),
         .imm_class(imm_class), .reg_op(reg_op), .cond(cond),
         .l(l), .imm12(imm12), .imm24(imm24),
         .z(z_r), .n(n_r), .c(c_r), .v(v_r),
         .pc(pc), .pc_next(pc_next), .shadow(shadow),
         .loop_reg(loop_reg), .halted(halted), .error(error),
         .error_code(error_code),
-        .loop_we(loop_we), .loop_in(loop_in)
+        .loop_we(loop_we), .loop_in(loop_in), .stall(stall)
     );
 
     // ===== channel state =====
-    logic [2:0]  ch_mode [0:3];   // fmt per channel
+    logic [2:0]  ch_mode [0:3];
     logic [7:0]  ch_page [0:3];
-    logic [23:0] ch_idx  [0:3];   // pixel index / stream pointer
-    logic [23:0] ch_step [0:3];   // signed step
+    logic [23:0] ch_idx  [0:3];
+    logic [23:0] ch_step [0:3];
 
     // ===== pixel_buffer =====
     logic [1:0]  pb_ch;
     logic [23:0] pb_addr;
     logic        pb_hit;
     logic [15:0] pb_rdata;
-    logic [7:0]  pb_miss_page;
-    logic [15:0] pb_miss_tag, pb_miss_data;
-    logic        pb_miss_dirty;
-    logic        pb_wb_done;
+    logic        pb_wb_req;
+    logic [23:0] pb_wb_addr;
+    logic [15:0] pb_wb_data;
+    logic        pb_wb_ack;
     logic        pb_fill_en;
     logic [15:0] pb_fill_data;
     logic        pb_we;
@@ -101,17 +134,16 @@ module top (
         .clk(clk), .rst(rst),
         .ch(pb_ch), .addr24(pb_addr),
         .hit(pb_hit), .rdata(pb_rdata),
-        .miss_page(pb_miss_page), .miss_tag(pb_miss_tag),
-        .miss_data(pb_miss_data), .miss_dirty(pb_miss_dirty),
-        .wb_done(pb_wb_done),
         .fill_en(pb_fill_en), .fill_data(pb_fill_data),
         .we(pb_we), .wdata(pb_wdata),
         .set_page_en(pb_set_page_en), .set_page_val(pb_set_page_val),
         .flush_en(pb_flush_en),
+        .wb_req(pb_wb_req), .wb_addr(pb_wb_addr), .wb_data(pb_wb_data),
+        .wb_ack(pb_wb_ack),
         .error(pb_error)
     );
 
-    // ===== addr_packer =====
+    // ===== addr_packer (SRC/DST/STM pixel addressing) =====
     logic [23:0] ap_idx;
     logic [7:0]  ap_page;
     logic [2:0]  ap_fmt;
@@ -151,70 +183,66 @@ module top (
         .is_write(pp_is_write_w)
     );
 
-    // ===== operand mux =====
+    // ===== operand codes =====
     logic [5:0]  dst_code, src_code;
     assign dst_code = {ds, dst};
     assign src_code = src;
 
-    // special operand read
+    // ===== classification =====
+    logic is_ctrl, is_ldi, is_cmp_tst, sp_write;
+    assign is_ctrl    = (imm_class == 2'b10);
+    assign is_ldi     = (imm_class == 2'b01);
+    assign is_cmp_tst = (reg_op == 5'd7) || (reg_op == 5'd8);
+    assign sp_write   = (!is_ctrl && !is_ldi && dst_code[5]);
+
+    // ===== write-path addr_packer (uses op_ch) =====
+    logic [23:0] wp_idx;
+    logic [7:0]  wp_page;
+    logic [2:0]  wp_fmt;
+    logic [23:0] wp_addr;
+    logic [3:0]  wp_pos;
+    assign wp_idx  = ch_idx[op_ch];
+    assign wp_page = ch_page[op_ch];
+    assign wp_fmt  = ch_mode[op_ch];
+    addr_packer apw (
+        .idx(wp_idx), .page(wp_page), .fmt(wp_fmt),
+        .addr24(wp_addr), .pos(wp_pos)
+    );
+
+    // write packer: uses wp_fmt / wp_pos / current buffer word
+    always_comb begin
+        pp_fmt_w  = wp_fmt;
+        pp_pos_w  = wp_pos;
+        pp_word_w = pb_rdata;
+        pp_pix_w  = (fsm == FSM_WRITE) ? op_pix : alu_res[15:0];
+    end
+
+    // ===== special operand read =====
     logic [23:0] sp_rd;
     logic [23:0] op_a, op_b;
 
-    // special operand write strobes
-    logic        sp_we;
-    logic [5:0]  sp_wcode;
-    logic [23:0] sp_wdata;
-
-    // ===== read special operand =====
     always_comb begin
         // defaults
         sp_rd      = 24'h0;
         pb_ch      = 2'd0;
         pb_addr    = 24'h0;
-        pb_we      = 1'b0;
-        pb_wdata   = 16'h0;
         pb_set_page_en = 1'b0;
         pb_set_page_val = 8'h0;
         pb_flush_en = 1'b0;
-        pb_wb_done  = 1'b0;
-        pb_fill_en  = 1'b0;
-        pb_fill_data = 16'h0;
         ap_idx  = 24'h0;
         ap_page = 8'h0;
         ap_fmt  = 3'd0;
         pp_fmt_r = 3'd0;
         pp_pos_r = 4'd0;
         pp_word_r = 16'h0;
-        pp_fmt_w = 3'd0;
-        pp_pos_w = 4'd0;
-        pp_word_w = 16'h0;
-        pp_pix_w = 16'h0;
-
-        // special writes (combinational strobes)
-        if (!is_ctrl && !is_ldi && dst_code[5]) begin
-            case (dst_code)
-                6'd44: begin pb_set_page_en = 1'b1; pb_set_page_val = alu_res[7:0]; end
-                6'd50: begin pb_set_page_en = 1'b1; pb_set_page_val = alu_res[7:0]; end
-                6'd56: begin pb_set_page_en = 1'b1; pb_set_page_val = alu_res[7:0]; end
-                6'd57: pb_flush_en = 1'b1;
-                default: ;
-            endcase
-        end
 
         case (src_code)
-            // ZERO
             6'd32: sp_rd = 24'h0;
-            // FLAGS
             6'd33: sp_rd = {20'h0, v, c, n, z};
-            // SHADOW
             6'd34: sp_rd = {8'h0, shadow};
-            // LOOP
             6'd35: sp_rd = loop_reg;
-            // BUSY_SRC/DST/STM — model: 0
             6'd36, 6'd37, 6'd38: sp_rd = 24'h0;
-            // SRC.IDX
             6'd39: sp_rd = ch_idx[0];
-            // SRC.PIX — read pixel, advance IDX
             6'd40: begin
                 ap_idx  = ch_idx[0];
                 ap_page = ch_page[0];
@@ -225,25 +253,16 @@ module top (
                 pp_pos_r = ap_pos;
                 pp_word_r = pb_rdata;
                 sp_rd = {8'h0, pp_pix_r};
-                // advance IDX by STEP
-                // (handled in always_ff on sp_we? no — read side advances)
             end
-            // SRC.W16
             6'd41: begin
-                ap_idx  = 24'h0;
                 pb_ch   = 2'd0;
                 pb_addr = {ch_page[0], ch_idx[0][15:0]} << 1;
                 sp_rd = {8'h0, pb_rdata};
             end
-            // SRC.STEP
             6'd42: sp_rd = ch_step[0];
-            // SRC.MODE
             6'd43: sp_rd = {21'h0, ch_mode[0]};
-            // SRC.PAGE
             6'd44: sp_rd = {16'h0, ch_page[0]};
-            // DST.IDX
             6'd45: sp_rd = ch_idx[1];
-            // DST.PIX (read: no IDX change)
             6'd46: begin
                 ap_idx  = ch_idx[1];
                 ap_page = ch_page[1];
@@ -255,41 +274,29 @@ module top (
                 pp_word_r = pb_rdata;
                 sp_rd = {8'h0, pp_pix_r};
             end
-            // DST.W16
             6'd47: begin
                 pb_ch   = 2'd1;
                 pb_addr = {ch_page[1], ch_idx[1][15:0]} << 1;
                 sp_rd = {8'h0, pb_rdata};
             end
-            // DST.STEP
             6'd48: sp_rd = ch_step[1];
-            // DST.MODE
             6'd49: sp_rd = {21'h0, ch_mode[1]};
-            // DST.PAGE
             6'd50: sp_rd = {16'h0, ch_page[1]};
-            // STM.PTR
             6'd51: sp_rd = ch_idx[2];
-            // STM.W16
             6'd52: begin
                 pb_ch   = 2'd2;
                 pb_addr = {ch_page[2], ch_idx[2][15:0]} << 1;
                 sp_rd = {8'h0, pb_rdata};
             end
-            // STM.W24
             6'd53: begin
                 pb_ch   = 2'd2;
                 pb_addr = {ch_page[2], ch_idx[2][15:0]} << 1;
-                sp_rd = {8'h0, pb_rdata};  // only low 16 here; upper handled by STEP
+                sp_rd = {8'h0, pb_rdata};
             end
-            // STM.STEP
             6'd54: sp_rd = ch_step[2];
-            // STM.MODE
             6'd55: sp_rd = {21'h0, ch_mode[2]};
-            // STM.PAGE
             6'd56: sp_rd = {16'h0, ch_page[2]};
-            // FLUSH
             6'd57: sp_rd = 24'h0;
-            // STM.PIX
             6'd58: begin
                 ap_idx  = ch_idx[2];
                 ap_page = ch_page[2];
@@ -303,7 +310,38 @@ module top (
             end
             default: sp_rd = 24'h0;
         endcase
+
+        // FSM override: fill/write use op_ch (the channel being written)
+        if (fsm == FSM_MEM_REQ || fsm == FSM_WRITE) begin
+            pb_ch   = op_ch;
+            pb_addr = wp_addr;
+        end
+
+        // special writes (PAGE / FLUSH)
+        if (sp_write) begin
+            case (dst_code)
+                6'd44: begin pb_set_page_en = 1'b1; pb_set_page_val = alu_res[7:0]; end
+                6'd50: begin pb_set_page_en = 1'b1; pb_set_page_val = alu_res[7:0]; end
+                6'd56: begin pb_set_page_en = 1'b1; pb_set_page_val = alu_res[7:0]; end
+                6'd57: if (fsm == FSM_IDLE) pb_flush_en = 1'b1;
+                default: ;
+            endcase
+        end
     end
+
+    // ===== GPU bus =====
+    assign gpu_req   = pb_wb_req || (fsm == FSM_MEM_REQ);
+    assign gpu_we    = pb_wb_req;
+    assign gpu_addr  = pb_wb_req ? pb_wb_addr : pb_addr;
+    assign gpu_wdata = pb_wb_req ? pb_wb_data : pp_word_w_out;
+    assign gpu_sel   = 2'b11;
+    assign pb_wb_ack = pb_wb_req && gpu_ack1;
+
+    // fill / write strobes
+    assign pb_fill_en   = (fsm == FSM_MEM_REQ) && gpu_ack1;
+    assign pb_fill_data = gpu_rdata;
+    assign pb_we        = (fsm == FSM_WRITE);
+    assign pb_wdata     = pp_word_w_out;
 
     // ===== operand read mux =====
     always_comb begin
@@ -332,16 +370,14 @@ module top (
     assign alu_a = (imm_class == 2'b01) ? 24'h0 : op_a;
     assign alu_b = op_b;
 
-    // ===== write-back to regfile =====
-    logic do_write, is_ctrl, is_cmp_tst, is_ldi;
-    assign is_ctrl    = (imm_class == 2'b10);
-    assign is_ldi     = (imm_class == 2'b01);
-    assign is_cmp_tst = (reg_op == 5'd7) || (reg_op == 5'd8);
-
+    // ===== write-back =====
     always_comb begin
         we    = 1'b0;
         wa    = 5'd0;
         wdata = 24'h0;
+
+        $display("WB: is_ctrl=%b is_ldi=%b dst_code=%d alu_res=%h op_a=%h op_b=%h imm12=%h imm24=%h",
+                 is_ctrl, is_ldi, dst_code, alu_res, op_a, op_b, imm12, imm24);
 
         if (!is_ctrl && !is_ldi) begin
             if (!is_cmp_tst && dst_code[5] == 1'b0) begin
@@ -356,16 +392,7 @@ module top (
         end
     end
 
-    // ===== special operand write (sp_we/sp_wcode/sp_wdata) =====
-    // set by the sequencer's CTRL_OP for C_IRQ etc.; here only MOV special writes.
-    // The actual "is this a special write" decision: dst_code[5] == 1 && !is_ctrl && !is_ldi
-    logic sp_write;
-    assign sp_write = (!is_ctrl && !is_ldi && dst_code[5]);
-    assign sp_wcode = dst_code;
-    assign sp_wdata = alu_res;
-
-
-    // ===== channel state update (always_ff) =====
+    // ===== channel state / FSM =====
     always_ff @(posedge clk) begin
         if (rst) begin
             for (int i = 0; i < 4; i++) begin
@@ -375,57 +402,66 @@ module top (
                 ch_step[i] <= 24'd0;
             end
             z_r <= 0; n_r <= 0; c_r <= 0; v_r <= 0;
+            fsm <= FSM_IDLE;
         end else begin
-            // flags update
             if (!is_ctrl) begin
                 if (f || is_cmp_tst) begin
                     z_r <= alu_z; n_r <= alu_n; c_r <= alu_c; v_r <= alu_v;
                 end
             end
 
-            // special writes
-            if (sp_write) begin
-                case (sp_wcode)
-                    // SRC.STEP
-                    6'd42: ch_step[0] <= sp_wdata;
-                    // SRC.MODE
-                    6'd43: ch_mode[0] <= sp_wdata[2:0];
-                    // SRC.PAGE
-                    6'd44: ch_page[0] <= sp_wdata[7:0];
-                    // DST.STEP
-                    6'd48: ch_step[1] <= sp_wdata;
-                    // DST.MODE
-                    6'd49: ch_mode[1] <= sp_wdata[2:0];
-                    // DST.PAGE
-                    6'd50: ch_page[1] <= sp_wdata[7:0];
-                    // STM.STEP
-                    6'd54: ch_step[2] <= sp_wdata;
-                    // STM.MODE
-                    6'd55: ch_mode[2] <= sp_wdata[2:0];
-                    // STM.PAGE
-                    6'd56: ch_page[2] <= sp_wdata[7:0];
-                    // SRC.IDX (set)
-                    6'd39: ch_idx[0] <= sp_wdata;
-                    // DST.IDX (set)
-                    6'd45: ch_idx[1] <= sp_wdata;
-                    // STM.PTR (set)
-                    6'd51: ch_idx[2] <= sp_wdata;
-                    default: ;
-                endcase
-            end
+            case (fsm)
+                FSM_IDLE: begin
+                                        $display("IDLE: ch_idx1=%h ch_mode1=%d", ch_idx[1], ch_mode[1]);
+                    if (sp_write) begin
+                        case (dst_code)
+                            6'd39: ch_idx[0] <= alu_res;
+                            6'd42: ch_step[0] <= alu_res;
+                            6'd43: ch_mode[0] <= alu_res[2:0];
+                            6'd44: ch_page[0] <= alu_res[7:0];
+                            6'd45: begin ch_idx[1] <= alu_res; $display("SET DST.IDX: alu_res=%h", alu_res); end
+                            6'd48: ch_step[1] <= alu_res;
+                            6'd49: ch_mode[1] <= alu_res[2:0];
+                            6'd50: ch_page[1] <= alu_res[7:0];
+                            6'd51: ch_idx[2] <= alu_res;
+                            6'd54: ch_step[2] <= alu_res;
+                            6'd55: ch_mode[2] <= alu_res[2:0];
+                            6'd56: ch_page[2] <= alu_res[7:0];
+                            default: ;
+                        endcase
+                    end
 
-            // PIX / W16 writes advance IDX
-            // (handled in read path below, but real pixel write must be here)
-            // Note: this skeleton does not complete the read-modify-write for DST.PIX
-            //       because pixel_buffer needs fill/writeback sequencing. That's the
-            //       next step (top v4).
+                    if (sp_write && (dst_code == 6'd46 || dst_code == 6'd47)) begin
+                        op_ch   <= 2'd1;
+                        op_code <= dst_code;
+                        op_pix  <= alu_res[15:0];
+                        fsm     <= pb_hit ? FSM_WRITE : FSM_MEM_REQ;
+                    end else if (src_code == 6'd40 && !is_ctrl && !is_ldi) begin
+                        ch_idx[0] <= ch_idx[0] + ch_step[0];
+                    end
+                end
+
+                FSM_MEM_REQ: begin
+                    if (gpu_ack1) fsm <= FSM_WRITE;
+                end
+
+                FSM_MEM_WAIT: begin
+                    // unused
+                end
+
+                FSM_WRITE: begin
+                    if (op_code == 6'd46) begin
+                        ch_idx[1] <= ch_idx[1] + ch_step[1];
+                    end else if (op_code == 6'd47) begin
+                        ch_idx[1] <= ch_idx[1] + 24'd1;
+                    end
+                    if (gpu_ack1 || !pb_hit) begin
+                        // wait one extra cycle so fill is visible
+                    end
+                    fsm <= FSM_IDLE;
+                end
+            endcase
         end
     end
-
-    // ===== placeholder for loop_we/loop_in =====
-    logic        loop_we;
-    logic [23:0] loop_in;
-    assign loop_we = 1'b0;
-    assign loop_in = 24'h0;
 
 endmodule
