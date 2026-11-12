@@ -124,8 +124,6 @@ module tb_sequencer;
         imm12 = 12'h070;
         @(posedge clk); #1;
         // C_JMP sets pc_next=0x070, then L overrides to 0x060 (count>1)
-        $display("JMP+L: loop_reg=%h l=%b imm_class=%b reg_op=%d pc_next=%h pc=%h",
-                 loop_reg, l, imm_class, reg_op, pc_next, pc);
         if (pc !== 12'h060) $error("JMP+L: pc=%h, expected 060", pc);
         if (loop_reg[23:12] !== 12'd1) $error("JMP+L: cnt=%0d, expected 1", loop_reg[23:12]);
 
@@ -137,10 +135,9 @@ module tb_sequencer;
         // reset and test error
         reg_op = C_NOP; imm12 = 12'h0; l = 1'b0;
         rst = 1; #20; rst = 0; #1;
-        $display("after reset: halted=%b error=%b", halted, error);
+;
         step_ctrl(C_HALT, 12'h123);
-        $display("HALT123: halted=%b error=%b error_code=%h imm_class=%b reg_op=%d imm12=%h",
-                 halted, error, error_code, imm_class, reg_op, imm12);
+
         if (!error) $error("HALT 123: not error");
         if (error_code !== 12'h123) $error("HALT 123: code=%h, expected 123", error_code);
 

@@ -1,32 +1,27 @@
-TOP ?= tb_regfile
-SIM ?= pixel_buffer
+YOSYS    := yosys
+NEXTPNR  := nextpnr-ecp5
+ECPPACK  := ecppack
+DEVICE   := 25k
+PACKAGE  := CABGA256
+LPF      := icesugar_pro.lpf
 
-.PHONY: lint sim sim-cpp clean
+RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_packer.sv rtl/addr_packer.sv \
+       rtl/pixel_buffer.sv rtl/sequencer.sv rtl/microcode_rom.sv rtl/top.sv \
+       rtl/top_fpga.sv
 
-lint:
-	verilator --lint-only -Wall -Wno-fatal -Wno-EOFNEWLINE -Wno-UNUSEDPARAM -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL rtl/*.sv
+.PHONY: all synth pnr bit clean
 
-sim:
-	./scripts/sim.sh $(TOP)
+all: bit
 
-sim-cpp:
-	mkdir -p build/sim_$(SIM)
-	verilator --cc --exe --build -j 1 \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module tb_pixel_buffer_wrapper \
-	    -Mdir $(CURDIR)/build/sim_$(SIM) \
-	    rtl/pixel_buffer.sv sim/tb_pixel_buffer_wrapper.sv $(CURDIR)/sim/main_$(SIM).cpp
-	./build/sim_$(SIM)/Vtb_pixel_buffer_wrapper
+synth:
+	$(YOSYS) -p "read_verilog -sv $(RTL); hierarchy -top top_fpga; synth_ecp5 -json top_fpga.json -no-rw-check; stat"
 
-sim-cpp-top:
-	mkdir -p build/sim_top
-	verilator --cc --exe --build -j 1 \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --trace \
-	    --top-module tb_top_wrapper \
-	    -Mdir $(CURDIR)/build/sim_top \
-	    rtl/*.sv sim/tb_top_wrapper.sv sim/memory_arbiter_stub.sv $(CURDIR)/sim/main_top.cpp
-	./build/sim_top/Vtb_top_wrapper
+pnr: synth
+	$(NEXTPNR) --$(DEVICE) --speed 6 --package $(PACKAGE) \
+	    --json top_fpga.json --lpf $(LPF) --textcfg top_fpga.config
+
+bit: pnr
+	$(ECPPACK) --input top_fpga.config --bit top_fpga.bit --svf top_fpga.svf
 
 clean:
-	rm -rf build
+	rm -f top_fpga.json top_fpga.config top_fpga.bit top_fpga.svf

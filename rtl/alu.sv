@@ -57,14 +57,8 @@ module alu (
                 s  = (b[4:0] >= 5'd24) ? 5'd23 : b[4:0];
                 res = sa >>> s;
             end
-            5'd12: begin                    // MUL
-                p = $signed(a) * $signed(b);
-                res = p[23:0];
-            end
-            5'd13: begin                    // MULH
-                p = $signed(a) * $signed(b);
-                res = p[35:12];
-            end
+            // 5'd12 (MUL), 5'd13 (MULH) — reserved, no ALU multiplier
+            // (multiplication lives in AddrPacker / DSP, not in the ALU)
             default: res = a;
         endcase
 

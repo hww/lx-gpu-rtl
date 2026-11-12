@@ -26,7 +26,7 @@ module sequencer (
     output logic [11:0] error_code,
     input  logic        start,
     input  logic        stall,
-    
+
     // test-only: write loop_reg
     input  logic        loop_we,
     input  logic [23:0] loop_in
@@ -97,7 +97,6 @@ module sequencer (
     // ---- state ----
     always_ff @(posedge clk) begin
         if (rst) begin
-            $display("SEQ rst: halted<=0");            
             pc         <= 12'h0;
             shadow     <= 16'h0;
             loop_reg   <= 24'h0;
@@ -109,8 +108,6 @@ module sequencer (
         end else if (halted || error || stall) begin
             // stay put
         end else begin
-             $display("FF: halted=%b error=%b imm_class=%b reg_op=%d imm12=%h",
-                     halted, error, imm_class, reg_op, imm12);
             pc <= pc_next_c;
 
             // loop register update

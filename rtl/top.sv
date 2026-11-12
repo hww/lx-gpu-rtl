@@ -22,7 +22,7 @@ module top (
     // ===== microcode ROM =====
     logic [11:0] pc;
     logic [31:0] insn;
-    microcode_rom #(.DEPTH(4096), .INIT_FILE("")) rom (
+    microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32), .INIT_FILE("microcode.hex")) rom (
         .clk(clk), .addr(pc), .data(insn),
         .we(rom_we), .waddr(rom_addr), .wdata(rom_wdata)
     );
@@ -81,9 +81,20 @@ module top (
     logic [1:0]  op_ch;
     logic [5:0]  op_code;
     logic [15:0] op_pix;
-    
+
     logic        stall;
-    assign stall = (fsm != FSM_IDLE) || pb_wb_req;
+    logic        fetch_wait;
+    logic [11:0] pc_r;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            pc_r <= 12'h0;
+            fetch_wait <= 1'b1;
+        end else begin
+            pc_r <= pc;
+            fetch_wait <= (pc != pc_r);
+        end
+    end
+    assign stall = fetch_wait || (fsm != FSM_IDLE) || pb_wb_req;
 
     // ===== loop_we/loop_in =====
     logic        loop_we;
@@ -376,9 +387,6 @@ module top (
         wa    = 5'd0;
         wdata = 24'h0;
 
-        $display("WB: is_ctrl=%b is_ldi=%b dst_code=%d alu_res=%h op_a=%h op_b=%h imm12=%h imm24=%h",
-                 is_ctrl, is_ldi, dst_code, alu_res, op_a, op_b, imm12, imm24);
-
         if (!is_ctrl && !is_ldi) begin
             if (!is_cmp_tst && dst_code[5] == 1'b0) begin
                 we    = 1'b1;
@@ -412,14 +420,13 @@ module top (
 
             case (fsm)
                 FSM_IDLE: begin
-                                        $display("IDLE: ch_idx1=%h ch_mode1=%d", ch_idx[1], ch_mode[1]);
                     if (sp_write) begin
                         case (dst_code)
                             6'd39: ch_idx[0] <= alu_res;
                             6'd42: ch_step[0] <= alu_res;
                             6'd43: ch_mode[0] <= alu_res[2:0];
                             6'd44: ch_page[0] <= alu_res[7:0];
-                            6'd45: begin ch_idx[1] <= alu_res; $display("SET DST.IDX: alu_res=%h", alu_res); end
+                            6'd45: ch_idx[1] <= alu_res;
                             6'd48: ch_step[1] <= alu_res;
                             6'd49: ch_mode[1] <= alu_res[2:0];
                             6'd50: ch_page[1] <= alu_res[7:0];

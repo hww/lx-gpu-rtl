@@ -46,13 +46,4 @@ module tb_top_wrapper (
             u_arb.mem[0] <= mem0_data;
     end
 
-        // debug: watch pixel buffer on FSM_WRITE
-    always @(posedge clk) begin
-        if (u_top.fsm == 2'd3) begin
-            $display("WRAP FSM_WRITE: pb_ch=%d pb_addr=%h pb_we=%b pb_wdata=%h pb_hit=%b pb_rdata=%h valid1=%b tag1=%h dirty1=%b",
-                     u_top.pb_ch, u_top.pb_addr, u_top.pb_we, u_top.pb_wdata,
-                     u_top.pb_hit, u_top.pb_rdata,
-                     u_top.pb.valid[1], u_top.pb.tag[1], u_top.pb.dirty[1]);
-        end
-    end
 endmodule

@@ -125,8 +125,6 @@ module pixel_buffer (
                         wb_ch    <= need_ch;
                         wb_state <= WB_REQ;
                     end else begin
-                        $display("PB: ch=%d we=%b hit=%b wdata=%h fill_en=%b fill_data=%h flush=%b set_page=%b valid1=%b tag1=%h dirty1=%b",
-                                 ch, we, hit, wdata, fill_en, fill_data, flush_en, set_page_en, valid[1], tag[1], dirty[1]);
                         // normal operation (no writeback pending)
                         if (flush_en) begin
                             for (i = 0; i < 4; i++) begin
