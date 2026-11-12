@@ -13,6 +13,19 @@ RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_packer.sv rtl/addr_packer.sv \
 
 all: bit
 
+.PHONY: all synth pnr bit clean sim-cpp-top
+
+sim-cpp-top:
+	mkdir -p build/sim_top
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --trace \
+	    --top-module tb_top_wrapper \
+	    -Mdir $(CURDIR)/build/sim_top \
+	    rtl/*.sv sim/tb_top_wrapper.sv sim/memory_arbiter_stub.sv $(CURDIR)/sim/main_top.cpp
+	./build/sim_top/Vtb_top_wrapper
+
 synth:
 	$(YOSYS) -p "read_verilog -sv $(RTL); hierarchy -top top_fpga; synth_ecp5 -json top_fpga.json -no-rw-check; stat"
 
@@ -22,6 +35,9 @@ pnr: synth
 
 bit: pnr
 	$(ECPPACK) --input top_fpga.config --bit top_fpga.bit --svf top_fpga.svf
+
+yosys:
+	yosys -p "read_verilog -sv rtl/*.sv; hierarchy -top top; synth_ecp5 -json top.json -no-rw-check; stat"
 
 clean:
 	rm -f top_fpga.json top_fpga.config top_fpga.bit top_fpga.svf
