@@ -78,13 +78,16 @@ module sequencer (
     endfunction
 
     // ===== CTRL op codes =====
-    localparam logic [4:0] C_NOP  = 5'd0;
-    localparam logic [4:0] C_JMP  = 5'd1;
-    localparam logic [4:0] C_CALL = 5'd2;
-    localparam logic [4:0] C_RET  = 5'd3;
-    localparam logic [4:0] C_JMPR = 5'd4;
-    localparam logic [4:0] C_HALT = 5'd5;
-    localparam logic [4:0] C_IRQ  = 5'd6;
+    // Используем `define, а не localparam: Verilator не поддерживает
+    // localparam с тем же именем, что и метка case.
+    `define OP_NOP   5'd0
+    `define OP_JMP   5'd1
+    `define OP_CALL  5'd2
+    `define OP_RET   5'd3
+    `define OP_JMPR  5'd4
+    `define OP_HALT  5'd5
+    `define OP_IRQ   5'd6
+    `define OP_FLUSH 5'd7
 
     logic is_ctrl;
     logic active;
@@ -101,7 +104,7 @@ module sequencer (
         taken_branch = 1'b0;
         if (do_ctrl) begin
             case (reg_op)
-                C_JMP, C_CALL, C_RET, C_JMPR: taken_branch = 1'b1;
+                `OP_JMP, `OP_CALL, `OP_RET, `OP_JMPR: taken_branch = 1'b1;
                 default: taken_branch = 1'b0;
             endcase
         end
@@ -114,10 +117,10 @@ module sequencer (
         // 1. taken branch overrides everything (L ignored)
         if (taken_branch) begin
             case (reg_op)
-                C_JMP, C_CALL: pc_next_c = imm12;
-                C_RET:         pc_next_c = shadow[11:0];
-                C_JMPR:        pc_next_c = jmpr_target;
-                default:       pc_next_c = pc + 12'd1;
+                `OP_JMP, `OP_CALL: pc_next_c = imm12;
+                `OP_RET:           pc_next_c = shadow[11:0];
+                `OP_JMPR:          pc_next_c = jmpr_target;
+                default:           pc_next_c = pc + 12'd1;
             endcase
         end
         // 2. L with CNT > 1 (only if no taken branch)
@@ -162,19 +165,15 @@ module sequencer (
             // control side effects
             if (do_ctrl) begin
                 case (reg_op)
-                    C_CALL:
-                            // ^^^ wait: SHADOW = {flags[3:0], PC+1[11:0]}
-                            // flags = {v, c, n, z} — 4 bits
-                            // so: shadow <= {v, c, n, z, pc + 12'd1};
-                            C_CALL: shadow <= {v, c, n, z, pc + 12'd1};
-                    C_HALT: begin
+                    `OP_CALL: shadow <= {v, c, n, z, pc + 12'd1};
+                    `OP_HALT: begin
                         if (imm12 == 12'h0) halted <= 1'b1;
                         else begin
                             error      <= 1'b1;
                             error_code <= imm12;
                         end
                     end
-                    C_IRQ: begin
+                    `OP_IRQ: begin
                         irq_pending <= 1'b1;
                         irq_code    <= imm12;
                     end

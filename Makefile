@@ -81,7 +81,15 @@ sim-image-roundtrip:
 
 .PHONY: sim-image-roundtrip
 
-
+sim-sequencer-cpp:
+	mkdir -p $(BUILD)/sim_sequencer
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module sequencer \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_sequencer \
+	    rtl/sequencer.sv $(CURDIR)/sim/tb_sequencer.cpp
+	./$(BUILD)/sim_sequencer/Vsequencer
 
 sim-alu-cpp:
 	mkdir -p $(BUILD)/sim_alu
@@ -92,3 +100,15 @@ sim-alu-cpp:
 	    -Mdir $(CURDIR)/$(BUILD)/sim_alu \
 	    rtl/alu.sv $(CURDIR)/sim/tb_alu.cpp
 	./$(BUILD)/sim_alu/Valu
+
+
+
+sim-pixel-engine-cpp:
+	mkdir -p $(BUILD)/sim_pixel_engine
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module pixel_engine \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_pixel_engine \
+	    rtl/pixel_engine.sv $(CURDIR)/sim/tb_pixel_engine.cpp
+	./$(BUILD)/sim_pixel_engine/Vpixel_engine
