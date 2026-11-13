@@ -47,8 +47,12 @@ bit: pnr
 # ---- hierarchical stat (per-module) ----
 stat-hier: | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
-	@echo "Report: $(BUILD)/stat_hier.txt"
-	@sed -n '/design hierarchy/,$$p' $(BUILD)/stat_hier.txt
+	@echo "Full report: $(BUILD)/stat_hier.txt"
+	@awk '/^=== /{m=$$2} \
+	      /LUT4/{l[m]=$$2} /TRELLIS_FF/{f[m]=$$2} /DP16KD/{d[m]=$$2} /MULT18X18D/{x[m]=$$2} \
+	      /^=== /{seen[m]=1} \
+	      END{printf "%-45s %7s %7s %5s %5s\n","module","LUT4","FF","EBR","DSP"; \
+	          for(k in seen) printf "%-45s %7d %7d %5d %5d\n",k,l[k],f[k],d[k],x[k]}' $(BUILD)/stat_hier.txt
 
 # ---- quick flat stat (no JSON) ----
 yosys: | $(BUILD)
