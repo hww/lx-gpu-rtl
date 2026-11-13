@@ -32,11 +32,11 @@ module microcode_rom #(
     end
 
     // Port B: read, 1-cycle latency
-    logic [ADDR_W-1:0] addr_r;
+    // (было: addr_r <= addr; data_r <= mem[addr_r]; — 2 такта)
+    // (стало: data_r <= mem[addr]; — 1 такт)
     logic [DATA_W-1:0] data_r;
     always_ff @(posedge clk) begin
-        addr_r <= addr;
-        data_r <= mem[addr_r];
+        data_r <= mem[addr];
     end
     assign data = data_r;
 

@@ -1,38 +1,60 @@
 `timescale 1ns/1ps
-// Program counter, SHADOW, LOOP, flags, and next-PC selection.
-// One instruction per cycle (the model does not simulate stalls).
+`default_nettype none
+
+// Program counter, SHADOW, LOOP.CNT/TGT, flags, next-PC selection.
+// One instruction per cycle (model). Ports may stall the sequencer.
+//
+// Priority for next PC:
+//   1. HALT (stops, PC not updated)
+//   2. Taken JMP / CALL / RET / JMPR (L ignored, CNT not decremented)
+//   3. L with CNT > 1 (PC = LOOP.TGT, CNT--)
+//   4. PC + 1
+//
+// L is allowed on any class. A taken branch overrides L.
+// CALL writes SHADOW = {flags[3:0], PC+1[11:0]}.
+// RET uses SHADOW[11:0] only (flags not restored).
+// JMPR uses operand REG[11:0].
+// start resets PC, ERROR, error_code.
 module sequencer (
     input  logic        clk,
     input  logic        rst,
 
     // instruction fields
-    input  logic [1:0]  imm_class,   // {J, I}
+    input  logic [1:0]  imm_class,   // {J, I}: 00=reg-reg, 01=LDI (unused), 10=ctrl, 11=reg-imm12
     input  logic [4:0]  reg_op,      // ALU op or CTRL op
     input  logic [3:0]  cond,
     input  logic        l,           // loop flag
     input  logic [11:0] imm12,       // ADDR / IMM12
-    input  logic [23:0] imm24,       // LDI24
 
     // current flags
     input  logic        z, n, c, v,
+
+    // from ALU
+    input  logic [11:0] jmpr_target, // operand[REG][11:0] for JMPR
 
     // outputs
     output logic [11:0] pc,
     output logic [11:0] pc_next,
     output logic [15:0] shadow,
-    output logic [23:0] loop_reg,
+    output logic [15:0] loop_cnt,    // CNT (16 bits)
+    output logic [11:0] loop_tgt,    // TGT (12 bits)
     output logic        halted,
     output logic        error,
     output logic [11:0] error_code,
+    output logic        irq_pending,
+    output logic [11:0] irq_code,
+
     input  logic        start,
     input  logic        stall,
 
-    // test-only: write loop_reg
-    input  logic        loop_we,
-    input  logic [23:0] loop_in
+    // test-only: write LOOP.CNT / LOOP.TGT
+    input  logic        loop_cnt_we,
+    input  logic [15:0] loop_cnt_in,
+    input  logic        loop_tgt_we,
+    input  logic [11:0] loop_tgt_in
 );
 
-    // condition decode
+    // ===== condition decode =====
     function automatic logic cond_true(input logic [3:0] cd,
                                        input logic zz, nn, cc, vv);
         case (cd)
@@ -55,7 +77,8 @@ module sequencer (
         endcase
     endfunction
 
-    // CTRL op codes (must match gpu.h CtrlOp)
+    // ===== CTRL op codes =====
+    localparam logic [4:0] C_NOP  = 5'd0;
     localparam logic [4:0] C_JMP  = 5'd1;
     localparam logic [4:0] C_CALL = 5'd2;
     localparam logic [4:0] C_RET  = 5'd3;
@@ -66,63 +89,94 @@ module sequencer (
     logic is_ctrl;
     logic active;
     logic do_ctrl;
+    logic taken_branch;
     logic [11:0] pc_next_c;
 
-    assign is_ctrl = (imm_class == 2'b10);   // J=1, I=0
+    assign is_ctrl = (imm_class == 2'b10);
     assign active  = cond_true(cond, z, n, c, v);
     assign do_ctrl = is_ctrl && active;
 
-    // ---- combinational next-PC ----
+    // taken_branch: JMP/CALL/RET/JMPR, taken
+    always_comb begin
+        taken_branch = 1'b0;
+        if (do_ctrl) begin
+            case (reg_op)
+                C_JMP, C_CALL, C_RET, C_JMPR: taken_branch = 1'b1;
+                default: taken_branch = 1'b0;
+            endcase
+        end
+    end
+
+    // ===== combinational next-PC =====
     always_comb begin
         pc_next_c = pc + 12'd1;
 
-        if (do_ctrl) begin
+        // 1. taken branch overrides everything (L ignored)
+        if (taken_branch) begin
             case (reg_op)
-                C_JMP:  pc_next_c = imm12;
-                C_CALL: pc_next_c = imm12;
-                C_RET:  pc_next_c = shadow[11:0];
-                C_JMPR: pc_next_c = 12'h0;   // filled by top
-                C_HALT: pc_next_c = pc + 12'd1;
-                default: ;
+                C_JMP, C_CALL: pc_next_c = imm12;
+                C_RET:         pc_next_c = shadow[11:0];
+                C_JMPR:        pc_next_c = jmpr_target;
+                default:       pc_next_c = pc + 12'd1;
             endcase
         end
-
-        // L override: loop target wins (only if count > 1)
-        if (l && (loop_reg[23:12] > 12'd1))
-            pc_next_c = loop_reg[11:0];
+        // 2. L with CNT > 1 (only if no taken branch)
+        else if (l && (loop_cnt > 16'd1)) begin
+            pc_next_c = loop_tgt;
+        end
+        // 3. PC + 1 (default)
     end
 
     assign pc_next = pc_next_c;
 
-    // ---- state ----
+    // ===== state =====
     always_ff @(posedge clk) begin
         if (rst) begin
-            pc         <= 12'h0;
-            shadow     <= 16'h0;
-            loop_reg   <= 24'h0;
-            halted     <= 1'b1;
-            error      <= 1'b0;
-            error_code <= 12'h0;
+            pc          <= 12'h0;
+            shadow      <= 16'h0;
+            loop_cnt    <= 16'h0;
+            loop_tgt    <= 12'h0;
+            halted      <= 1'b1;
+            error       <= 1'b0;
+            error_code  <= 12'h0;
+            irq_pending <= 1'b0;
+            irq_code    <= 12'h0;
         end else if (start) begin
-            halted <= 1'b0;            
+            pc          <= 12'h0;
+            halted      <= 1'b0;
+            error       <= 1'b0;
+            error_code  <= 12'h0;
+            irq_pending <= 1'b0;
+            irq_code    <= 12'h0;
         end else if (halted || error || stall) begin
             // stay put
         end else begin
             pc <= pc_next_c;
 
-            // loop register update
-            if (loop_we)
-                loop_reg <= loop_in;
-            else if (l && (loop_reg[23:12] > 12'd1))
-                loop_reg <= {loop_reg[23:12] - 12'd1, loop_reg[11:0]};
+            // LOOP.CNT / LOOP.TGT update (test-only, via ports)
+            if (loop_cnt_we) loop_cnt <= loop_cnt_in;
+            else if (l && !taken_branch && (loop_cnt > 16'd1))
+                loop_cnt <= loop_cnt - 16'd1;
+            if (loop_tgt_we) loop_tgt <= loop_tgt_in;
 
             // control side effects
             if (do_ctrl) begin
                 case (reg_op)
-                    C_CALL: shadow <= {4'h0, pc + 12'd1};
+                    C_CALL:
+                            // ^^^ wait: SHADOW = {flags[3:0], PC+1[11:0]}
+                            // flags = {v, c, n, z} — 4 bits
+                            // so: shadow <= {v, c, n, z, pc + 12'd1};
+                            C_CALL: shadow <= {v, c, n, z, pc + 12'd1};
                     C_HALT: begin
                         if (imm12 == 12'h0) halted <= 1'b1;
-                        else begin error <= 1'b1; error_code <= imm12; end
+                        else begin
+                            error      <= 1'b1;
+                            error_code <= imm12;
+                        end
+                    end
+                    C_IRQ: begin
+                        irq_pending <= 1'b1;
+                        irq_code    <= imm12;
                     end
                     default: ;
                 endcase

@@ -1,90 +1,123 @@
 `timescale 1ns/1ps
+`default_nettype none
+
+// 16-bit ALU with class-based opcode (op[4:3]).
+//   00 = logic:    op[2:1] = MOV/AND/OR/XOR, op[0] = inv
+//   01 = arith:    op[2:1] = ADD/ADC/SUB/SBC, op[0] = sub
+//   10 = shift:    op[2:1] = ROR/SHR/SAR
+//   11 = other:    op[2:1] = MUL/RSV/TST/CMP
+//   nowrite = op[2] (для logic/arith: не писать результат, только флаги)
+//           = (fn != 00) для other (MUL пишет, TST/CMP нет)
+//
+// Flags: Z N C V. C = carry out (not borrow for SUB/SBC/CMP).
+// MUL: signed 16x16 -> 32, low 16 to res, high 16 to mhi (registered).
 module alu (
+    input  logic        clk,
+    input  logic        rst,
     input  logic [4:0]  op,
-    input  logic [23:0] a,
-    input  logic [23:0] b,
-    output logic [23:0] res,
+    input  logic [15:0] a,
+    input  logic [15:0] b,
+    input  logic        c_in,        // для ADC/SBC
+    output logic [15:0] res,
+    output logic [15:0] mhi,         // старшие 16 бит последнего MUL
+    output logic        nowrite,     // 1 = только флаги (CMP/TST)
     output logic        z,
     output logic        n,
     output logic        c,
     output logic        v
 );
 
-    // ===== op decode =====
-    logic sub, is_arith, is_shift, is_logic, is_mul;
-    assign sub      = (op == 5'd6) || (op == 5'd7);       // SUB, CMP
-    assign is_arith = (op == 5'd5) || sub;                // ADD, SUB, CMP
-    assign is_shift = (op >= 5'd9) && (op <= 5'd11);      // ROR, SHR, SAR
-    assign is_logic = (op <= 5'd4) || (op == 5'd8);       // MOV..ANDN, TST
-    assign is_mul   = (op == 5'd12);                      // MUL
+    // ===== decode =====
+    logic [1:0] cls;
+    logic [1:0] fn;
+    logic       inv;
+    logic       sub;
+    logic       cin_sel;
 
-    // ===== one adder: a + (b ^ {24{sub}}) + sub =====
-    logic [23:0] b_x;
-    logic [25:0] sum_ext;
-    logic [24:0] sum;
-    assign b_x     = b ^ {24{sub}};
-    assign sum_ext = {1'b0, a, sub} + {1'b0, b_x, 1'b0};
-    assign sum     = sum_ext[25:1];
+    assign cls     = op[4:3];
+    assign fn      = op[2:1];
+    assign inv     = (cls == 2'b00) ? op[0] : 1'b0;
+    assign sub = (cls == 2'b01) ? op[0] : (cls == 2'b11 && fn == 2'b11) ? 1'b1 : 1'b0;
+    assign cin_sel = (cls == 2'b01) ? op[1] : 1'b0;
 
-    // ===== one right shifter: ROR / SHR / SAR =====
-    logic        is_ror;
-    logic [4:0]  sh;
-    logic        fill;
-    logic [23:0] s0, s1, s2, s3, s4;
+    // nowrite: для logic/arith — op[2]; для other — (fn != 00)
+    assign nowrite = (cls == 2'b00 || cls == 2'b01) ? op[2] :
+                     (cls == 2'b11) ? (fn != 2'b00) : 1'b0;
 
-    assign is_ror = (op == 5'd9);
-    // ROR: mod 24 (b=24..31 -> b-24 = b[2:0]); SHR/SAR: b as is
-    assign sh   = (is_ror && b[4] && b[3]) ? {2'b00, b[2:0]} : b[4:0];
-    assign fill = (op == 5'd11) & a[23];   // SAR: sign, SHR: 0
+    // ===== operand B =====
+    logic [15:0] b_x;
+    assign b_x = b ^ {16{inv | sub}};
 
-    assign s0 = sh[0] ? {is_ror ? a[0]     : fill,       a[23:1]}   : a;
-    assign s1 = sh[1] ? {is_ror ? s0[1:0]  : {2{fill}},  s0[23:2]}  : s0;
-    assign s2 = sh[2] ? {is_ror ? s1[3:0]  : {4{fill}},  s1[23:4]}  : s1;
-    assign s3 = sh[3] ? {is_ror ? s2[7:0]  : {8{fill}},  s2[23:8]}  : s2;
-    assign s4 = sh[4] ? {is_ror ? s3[15:0] : {16{fill}}, s3[23:16]} : s3;
+    // ===== сумматор =====
+    logic        cin;
+    logic [16:0] sum;
+    assign cin = cin_sel ? c_in : (inv | sub);
+    assign sum = {1'b0, a} + {1'b0, b_x} + {17'd0, cin};
 
-    // ===== logic ops =====
-    logic [23:0] logic_res;
+    // ===== логика =====
+    logic [15:0] logic_res;
     always_comb begin
-        case (op)
-            5'd0: logic_res = b;          // MOV
-            5'd1: logic_res = a & b;      // AND
-            5'd2: logic_res = a | b;      // OR
-            5'd3: logic_res = a ^ b;      // XOR
-            5'd4: logic_res = a & ~b;     // ANDN
-            5'd8: logic_res = a & b;      // TST
-            default: logic_res = a;
+        case (fn)
+            2'b00: logic_res = b_x;       // MOV / MVN
+            2'b01: logic_res = a & b_x;   // AND / BIC
+            2'b10: logic_res = a | b_x;   // OR / ORN
+            2'b11: logic_res = a ^ b_x;   // XOR / XNOR
         endcase
     end
 
-    // ===== MUL: 18x18 -> 24 (one ECP5 DSP) =====
-    logic signed [17:0] a18, b18;
-    logic signed [35:0] mul_p;
-    assign a18 = a[17:0];
-    assign b18 = b[17:0];
-    assign mul_p = a18 * b18;
+    // ===== сдвигатель (mod 16) =====
+    logic [3:0]  sh;
+    logic        fill;
+    logic [15:0] s0, s1, s2, s3;
+    logic        is_ror;
 
-    // ===== result mux =====
+    assign sh     = b[3:0];
+    assign is_ror = (fn == 2'b00);
+    assign fill   = (fn == 2'b10) & a[15];
+
+    assign s0 = sh[0] ? {is_ror ? a[0] : fill, a[15:1]} : a;
+    assign s1 = sh[1] ? {is_ror ? s0[1:0] : {2{fill}}, s0[15:2]} : s0;
+    assign s2 = sh[2] ? {is_ror ? s1[3:0] : {4{fill}}, s1[15:4]} : s1;
+    assign s3 = sh[3] ? {is_ror ? s2[7:0] : {8{fill}}, s2[15:8]} : s2;
+
+    // ===== MUL (signed 16x16 -> 32) =====
+    logic signed [15:0] a_s, b_s;
+    logic signed [31:0] mul_p;
+    assign a_s = a;
+    assign b_s = b;
+    assign mul_p = a_s * b_s;
+
+    logic [15:0] mul_lo, mul_hi;
+    assign mul_lo = mul_p[15:0];
+    assign mul_hi = mul_p[31:16];
+
+    // MHI регистр (защёлкивается на MUL)
+    always_ff @(posedge clk) begin
+        if (rst) mhi <= 16'h0;
+        else if (cls == 2'b11 && fn == 2'b00) mhi <= mul_hi;
+    end
+
+    // ===== выбор результата =====
     always_comb begin
         res = a;
-        c   = 1'b0;
-        v   = 1'b0;
-
-        if (is_arith) begin
-            res = sum[23:0];
-            c   = sub ? !sum[24] : sum[24];
-            v   = sub ? ((a[23] != b[23]) && (res[23] != a[23]))
-                      : ((a[23] == b[23]) && (res[23] != a[23]));
-        end else if (is_shift) begin
-            res = s4;
-        end else if (is_mul) begin
-            res = mul_p[23:0];
-        end else begin
-            res = logic_res;
-        end
-
-        z = (res == 24'h0);
-        n = res[23];
+        case (cls)
+            2'b00: res = logic_res;
+            2'b01: res = sum[15:0];
+            2'b10: res = s3;
+            2'b11: res = (fn == 2'b00) ? mul_lo : a;
+        endcase
     end
+
+    // ===== флаги =====
+    logic [15:0] flag_res;
+    assign flag_res = (cls == 2'b11 && fn == 2'b10) ? (a & b_x) :   // TST
+                      (cls == 2'b11 && fn == 2'b11) ? sum[15:0] :  // CMP
+                      res;
+
+    assign z = (flag_res == 16'h0);
+    assign n = flag_res[15];
+    assign c = (cls == 2'b01) ? sum[16] : (cls == 2'b11 && fn == 2'b11) ? sum[16] : 1'b0;
+    assign v = (cls == 2'b01) ?
+               ((a[15] == b_x[15]) && (sum[15] != a[15])) : 1'b0;
 
 endmodule

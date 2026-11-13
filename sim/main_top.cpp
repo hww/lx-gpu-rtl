@@ -1,91 +1,305 @@
 #include "Vtb_top_wrapper.h"
 #include "verilated.h"
-#include "verilated_vcd_c.h"
+#include "image_io.h"
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+#include <string>
 
 static Vtb_top_wrapper* dut;
-static VerilatedVcdC* tfp;
-static uint64_t t = 0;
+static uint64_t cycles = 0;
 
-static void tick() {
-    dut->clk = 0; dut->eval(); if (tfp) tfp->dump(t++);
-    dut->clk = 1; dut->eval(); if (tfp) tfp->dump(t++);
-    dut->clk = 0; dut->eval(); if (tfp) tfp->dump(t++);
+#define MEM_WORDS 32768
+static uint16_t mem[MEM_WORDS];
+
+// ---------------------------------------------------------------------------
+// Тактирование + эмуляция WB-памяти
+// ---------------------------------------------------------------------------
+static void step() {
+    // WB memory emulator (combinational before posedge)
+    dut->wb_ack = 0;
+    dut->wb_dat_i = 0;
+    if (dut->wb_cyc && dut->wb_stb) {
+        uint32_t a = (dut->wb_adr >> 1) & (MEM_WORDS - 1);
+        if (dut->wb_we) mem[a] = dut->wb_dat_o;
+        else           dut->wb_dat_i = mem[a];
+        dut->wb_ack = 1;
+    }
+    dut->eval();
+    dut->clk = 1; dut->eval();
+    dut->clk = 0; dut->eval();
+    ++cycles;
 }
 
 static void load_rom(uint16_t addr, uint32_t w) {
-    dut->rom_we = 1;
-    dut->rom_addr = addr;
-    dut->rom_wdata = w;
-    tick();
+    dut->rom_we = 1; dut->rom_addr = addr; dut->rom_wdata = w;
+    step();
     dut->rom_we = 0;
 }
 
+static void load_file(const char* path, uint32_t byte_off) {
+    FILE* f = fopen(path, "rb");
+    if (!f) { printf("cannot open %s\n", path); return; }
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    std::vector<uint8_t> buf(sz);
+    fread(buf.data(), 1, sz, f); fclose(f);
+    for (long i = 0; i + 1 < sz; i += 2) {
+        uint32_t w = (byte_off + i) / 2;
+        if (w < MEM_WORDS) mem[w] = buf[i] | (buf[i+1] << 8);
+    }
+    printf("loaded %s (%ld bytes) at 0x%X\n", path, sz, byte_off);
+}
+
+static void save_file(const char* path, uint32_t byte_off, uint32_t size) {
+    FILE* f = fopen(path, "wb");
+    if (!f) { printf("cannot write %s\n", path); return; }
+    for (uint32_t i = 0; i < size; i += 2) {
+        uint32_t w = (byte_off + i) / 2;
+        uint16_t v = (w < MEM_WORDS) ? mem[w] : 0;
+        fputc(v & 0xFF, f); fputc(v >> 8, f);
+    }
+    fclose(f);
+    printf("saved %s (%u bytes) from 0x%X\n", path, size, byte_off);
+}
+
+// ---------------------------------------------------------------------------
+// Выбор палитры по формату
+// ---------------------------------------------------------------------------
+static const uint32_t* palette_for(PixelFormat fmt, int& out_n) {
+    switch (fmt) {
+        case PixelFormat::BPP1:  out_n = 2;   return vga16_palette;
+        case PixelFormat::BPP4:  out_n = 16;  return vga16_palette;
+        case PixelFormat::BPP8:  out_n = 256; return get_websafe216_palette();
+        default:                 out_n = 0;   return nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Загрузка PNG в mem[]
+// ---------------------------------------------------------------------------
+static bool load_png_into_mem(const char* path, PixelFormat fmt,
+                              uint32_t byte_off,
+                              int expect_w, int expect_h,
+                              size_t& out_words) {
+    Image img;
+    if (!read_image(path, img)) return false;
+
+    if (expect_w && img.width  != expect_w) {
+        fprintf(stderr, "load_png: width mismatch (%d != %d)\n", img.width, expect_w);
+        return false;
+    }
+    if (expect_h && img.height != expect_h) {
+        fprintf(stderr, "load_png: height mismatch (%d != %d)\n", img.height, expect_h);
+        return false;
+    }
+
+    std::string err;
+    if (!check_resolution(img.width, img.height, fmt, err)) {
+        fprintf(stderr, "load_png: %s\n", err.c_str());
+        return false;
+    }
+
+    int pal_n = 0;
+    const uint32_t* pal = palette_for(fmt, pal_n);
+
+    std::vector<uint8_t>  idx   = quantize(img, fmt, pal, pal_n);
+    std::vector<uint16_t> words = pack_pixels(idx, img.width, img.height, fmt);
+
+    uint32_t base_word = byte_off / 2;
+    if (base_word + words.size() > MEM_WORDS) {
+        fprintf(stderr, "load_png: PNG overflows memory (%zu words at 0x%X)\n",
+                words.size(), byte_off);
+        return false;
+    }
+    for (size_t i = 0; i < words.size(); i++) mem[base_word + i] = words[i];
+
+    printf("loaded %s (%dx%d, %s) at byte offset 0x%X (%zu words)\n",
+           path, img.width, img.height, format_name(fmt),
+           byte_off, words.size());
+    out_words = words.size();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Дамп mem[] в PNG
+// ---------------------------------------------------------------------------
+static bool dump_mem_to_png(const char* path, PixelFormat fmt,
+                            uint32_t byte_off, int w, int h) {
+    if (w <= 0 || h <= 0) {
+        fprintf(stderr, "dump_png: invalid dimensions %dx%d\n", w, h);
+        return false;
+    }
+    std::string err;
+    if (!check_resolution(w, h, fmt, err)) {
+        fprintf(stderr, "dump_png: %s\n", err.c_str());
+        return false;
+    }
+
+    int bpp = bits_per_pixel(fmt);
+    size_t n_bits  = (size_t)w * h * bpp;
+    size_t n_words = (n_bits + 15) / 16;
+
+    std::vector<uint16_t> words(n_words);
+    uint32_t base_word = byte_off / 2;
+    for (size_t i = 0; i < n_words; i++) {
+        words[i] = (base_word + i < MEM_WORDS) ? mem[base_word + i] : 0;
+    }
+
+    std::vector<uint8_t> idx = unpack_pixels(words, w, h, fmt);
+
+    int pal_n = 0;
+    const uint32_t* pal = palette_for(fmt, pal_n);
+
+    Image out = dequantize(idx, w, h, fmt, pal);
+    if (!write_image(path, out)) return false;
+
+    printf("dumped %s (%dx%d, %s) from byte offset 0x%X\n",
+           path, w, h, format_name(fmt), byte_off);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
     dut = new Vtb_top_wrapper;
-    tfp = new VerilatedVcdC;
-    dut->trace(tfp, 500);
-    tfp->open("build/tb_top_wrapper.vcd");
+   
+    VerilatedVcdC tfp;
+    Verilated::traceEverOn(true);
+    dut->trace(&tfp, 99);
+    tfp.open("sim/trace.vcd");
 
-       // 1. reset (full cycle)
-    dut->rst = 1;
-    dut->start = 0;
-    dut->rom_we = 0; dut->mem0_we = 0;
-    tick(); tick();
+    // ---- старые аргументы (raw binary) ----
+    const char* prog = nullptr;
+    const char* s1 = nullptr; uint32_t s1_off_raw = 0x1000;
+    const char* s2 = nullptr; uint32_t s2_off_raw = 0x2000;
+    const char* dst_raw = nullptr; uint32_t dst_off_raw = 0x3000, dst_size_raw = 0x1000;
 
-    // 2. release reset: halted=1, pc=0, processor idle
-    dut->rst = 0;
-    tick();
+    // ---- новые аргументы (PNG) ----
+    const char* s1in_path = nullptr;
+    PixelFormat s1fmt = PixelFormat::BPP8;
+    uint32_t    s1in_off = 0;
+    int         s1in_w = 0, s1in_h = 0;
 
-    // 3. load ROM while idle (pc frozen)
-    // generate microcode.hex for synthesis
-    FILE* f = fopen("microcode.hex", "w");
-    if (f) {
-        uint32_t rom_vals[7] = {
-            (0u<<31)|(3u<<29)|(18u<<24)|(1u<<23)|(0u<<19)|(0u<<18)|(0u<<13)|(0u<<12)|(0u<<0),
-            (0u<<31)|(3u<<29)|(17u<<24)|(1u<<23)|(0u<<19)|(0u<<18)|(0u<<13)|(0u<<12)|(2u<<0),
-            (0u<<31)|(3u<<29)|(16u<<24)|(1u<<23)|(0u<<19)|(0u<<18)|(0u<<13)|(0u<<12)|(1u<<0),
-            (0u<<31)|(3u<<29)|(13u<<24)|(1u<<23)|(0u<<19)|(0u<<18)|(0u<<13)|(0u<<12)|(0u<<0),
-            (0u<<31)|(3u<<29)|(14u<<24)|(1u<<23)|(0u<<19)|(0u<<18)|(0u<<13)|(0u<<12)|(0xAu<<0),
-            (0u<<31)|(0u<<29)|(25u<<24)|(1u<<23)|(0u<<19)|(0u<<18)|(0u<<13)|(0u<<12)|(32u<<7),
-            (0u<<31)|(2u<<29)|(0u<<24)|(0u<<23)|(0u<<19)|(0u<<18)|(5u<<13)|(0u<<12)|(0u<<0),
-        };
-        for (int i = 0; i < 4096; i++) {
-            fprintf(f, "%08x\n", i < 7 ? rom_vals[i] : 0u);
+    const char* dout_path = nullptr;
+    PixelFormat dfmt = PixelFormat::BPP8;
+    uint32_t    dout_off = 0;
+    int         dout_w = 0, dout_h = 0;
+
+    for (int i = 1; i < argc; i++) {
+        // старые
+        if      (!strcmp(argv[i], "-p")     && i+1 < argc) prog = argv[++i];
+        else if (!strcmp(argv[i], "-s1")    && i+1 < argc) s1 = argv[++i];
+        else if (!strcmp(argv[i], "-s2")    && i+1 < argc) s2 = argv[++i];
+        else if (!strcmp(argv[i], "-d")     && i+1 < argc) dst_raw = argv[++i];
+        else if (!strcmp(argv[i], "-s1off") && i+1 < argc) s1_off_raw = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-s2off") && i+1 < argc) s2_off_raw = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-doff")  && i+1 < argc) dst_off_raw = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-dsize") && i+1 < argc) dst_size_raw = strtoul(argv[++i], 0, 0);
+
+        // новые PNG-источники
+        else if (!strcmp(argv[i], "-s1in")  && i+1 < argc) s1in_path = argv[++i];
+        else if (!strcmp(argv[i], "-s1fmt") && i+1 < argc) {
+            if (!parse_format(argv[++i], s1fmt)) { fprintf(stderr, "bad -s1fmt\n"); return 1; }
+        }
+        else if (!strcmp(argv[i], "-s1off") && i+1 < argc) { /* уже разобрано выше как raw */ }
+        else if (!strcmp(argv[i], "-s1woff")&& i+1 < argc) s1in_off = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-s1w")   && i+1 < argc) s1in_w = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-s1h")   && i+1 < argc) s1in_h = atoi(argv[++i]);
+
+        // новые PNG-дампы
+        else if (!strcmp(argv[i], "-dout")  && i+1 < argc) dout_path = argv[++i];
+        else if (!strcmp(argv[i], "-dfmt")  && i+1 < argc) {
+            if (!parse_format(argv[++i], dfmt)) { fprintf(stderr, "bad -dfmt\n"); return 1; }
+        }
+        else if (!strcmp(argv[i], "-doff")  && i+1 < argc) { /* уже разобрано выше как raw */ }
+        else if (!strcmp(argv[i], "-dwoff") && i+1 < argc) dout_off = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-dw")    && i+1 < argc) dout_w = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dh")    && i+1 < argc) dout_h = atoi(argv[++i]);
+
+        else {
+            fprintf(stderr, "unknown arg: %s\n", argv[i]);
+            return 1;
+        }
+    }
+
+    // Если задан -s1in, то -s1off означает PNG-смещение (перекрываем raw)
+    if (s1in_path) s1in_off = s1_off_raw;   // s1_off_raw сюда уже попал из -s1off
+    if (dout_path) dout_off = dst_off_raw;  // аналогично
+
+    memset(mem, 0, sizeof(mem));
+
+    // reset
+    dut->rst = 1; dut->start = 0;
+    dut->rom_we = 0; dut->wb_ack = 0; dut->wb_dat_i = 0;
+    step(); step();
+    dut->rst = 0; step();
+
+    // ---- загрузка ROM ----
+    if (prog) {
+        FILE* f = fopen(prog, "r");
+        if (!f) { fprintf(stderr, "cannot open %s\n", prog); return 1; }
+        char line[256]; uint16_t a = 0;
+        while (fgets(line, sizeof(line), f)) {
+            char* p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '\0' || *p == '\n' || *p == ';' || *p == '#') continue;
+            uint32_t w = strtoul(p, nullptr, 16);
+            load_rom(a++, w);
+            printf("  [%03X] %08X\n", (unsigned)(a-1), w);
         }
         fclose(f);
-        printf("wrote microcode.hex (4096 words)\n");
+        printf("loaded microcode %s (%u words)\n", prog, a);
     }
 
-    // 4. preload stub mem[0]
-    dut->mem0_we = 1; dut->mem0_data = 0xFFFF;
-    tick();
-    dut->mem0_we = 0;
+    // ---- загрузка raw binaries (обратная совместимость) ----
+    if (s1) load_file(s1, s1_off_raw);
+    if (s2) load_file(s2, s2_off_raw);
 
-    // 5. start (halted=0, pc=0)
-    dut->start = 1;
-    tick();
-    dut->start = 0;
-
-    // run
-    for (int i = 0; i < 1500; i++) {
-        tick();
-        if (dut->halted) break;
-        if (dut->error) { printf("FAIL top error\n"); tfp->close(); return 1; }
+    // ---- загрузка PNG ----
+    if (s1in_path) {
+        size_t n_words = 0;
+        if (!load_png_into_mem(s1in_path, s1fmt, s1in_off, s1in_w, s1in_h, n_words))
+            return 1;
     }
 
-    if (!dut->halted) { printf("FAIL: not halted\n"); tfp->close(); return 1; }
-    if (dut->debug_mem0 != 0xAFFF) {
-        printf("FAIL mem[0]=%04X, expected AFFF\n", dut->debug_mem0);
-        tfp->close();
+    // ---- старт ----
+    dut->start = 1; step(); dut->start = 0;
+
+    // ---- прогон ----
+    uint64_t limit = 100000000ULL;
+    while (!dut->halted && !dut->error && cycles < limit) step();
+
+    if (!dut->halted) {
+        printf("FAIL: not halted (cycles=%llu)\n", (unsigned long long)cycles);
         return 1;
     }
+    if (dut->error) {
+        printf("FAIL: error\n");
+        return 1;
+    }
+    printf("HALTED: cycles=%llu\n", (unsigned long long)cycles);
 
-    printf("top OK: mem[0]=%04X halted=1\n", dut->debug_mem0);
-    printf("ALL PASS\n");
-    tfp->close();
+    // ---- существующая отладка ----   
+    printf("registers R0..R31:\n");
+        for (int i = 0; i < 32; i++) {
+            printf("  R%02d = %06X\n", i, dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem_a[i]);
+    }           
+
+    printf("mem[0x000]=%04X mem[0x100]=%04X mem[0x180]=%04X mem[0x200]=%04X\n",
+           mem[0x000], mem[0x100], mem[0x180], mem[0x200]);
+
+    // ---- дамп в raw (старое поведение) ----
+    if (dst_raw) save_file(dst_raw, dst_off_raw, dst_size_raw);
+
+    // ---- дамп в PNG ----
+    if (dout_path) {
+        if (!dump_mem_to_png(dout_path, dfmt, dout_off, dout_w, dout_h))
+            return 1;
+    }
+
     delete dut;
     return 0;
 }

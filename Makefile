@@ -24,11 +24,13 @@ sim-cpp-top:
 	mkdir -p $(BUILD)/sim_top
 	verilator --cc --exe --build -j 1 \
 	    -DSIMULATION \
+	    -CFLAGS "-I$(CURDIR)/third_party/stb" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --trace \
 	    --top-module tb_top_wrapper \
 	    -Mdir $(CURDIR)/$(BUILD)/sim_top \
-	    rtl/*.sv sim/tb_top_wrapper.sv sim/memory_arbiter_stub.sv $(CURDIR)/sim/main_top.cpp
+	    rtl/*.sv sim/tb_top_wrapper.sv sim/memory_arbiter_stub.sv \
+	    $(CURDIR)/sim/main_top.cpp $(CURDIR)/$(IMAGE_IO_SRC)
 	./$(BUILD)/sim_top/Vtb_top_wrapper
 
 # ---- synthesis for PnR ----
@@ -60,3 +62,33 @@ yosys: | $(BUILD)
 
 clean:
 	rm -rf $(BUILD)
+
+
+# --- image I/O (stb + обёртка) ---
+IMAGE_IO_SRC := sim/image_io.cpp
+IMAGE_IO_HDR := sim/image_io.h third_party/stb/stb_image.h third_party/stb/stb_image_write.h
+STB_FLAGS    := -Ithird_party/stb -DSIMULATION
+
+# --- roundtrip test: PNG -> pack -> mem -> unpack -> PNG (без GPU) ---
+sim-image-roundtrip:
+	mkdir -p $(BUILD)/sim_image_roundtrip
+	g++ -std=c++17 -O2 -Wall $(STB_FLAGS) \
+	    -o $(BUILD)/sim_image_roundtrip/image_roundtrip \
+	    sim/main_image_roundtrip.cpp $(IMAGE_IO_SRC)
+	./$(BUILD)/sim_image_roundtrip/image_roundtrip
+
+
+
+.PHONY: sim-image-roundtrip
+
+
+
+sim-alu-cpp:
+	mkdir -p $(BUILD)/sim_alu
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module alu \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_alu \
+	    rtl/alu.sv $(CURDIR)/sim/tb_alu.cpp
+	./$(BUILD)/sim_alu/Valu

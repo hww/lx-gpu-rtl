@@ -1,0 +1,18 @@
+; MOV SRC.PAGE, 0
+6C800000
+; MOV SRC.MODE, 2 (4bpp)
+6B800002
+; MOV SRC.STEP, 1
+6A800001
+; MOV SRC.IDX, 0x400
+67800400
+; MOV T0, SRC.PIX      — читаем пиксель 0
+77001400
+; MOV T1, SRC.PIX      — читаем пиксель 1 (IDX автоинкремент?)
+77001400
+; MOV T2, SRC.PIX      — пиксель 2
+77001400
+; MOV T3, SRC.PIX      — пиксель 3
+77001400
+; HALT
+4000A000
