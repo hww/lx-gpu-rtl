@@ -33,7 +33,7 @@ sim-cpp-top:
 
 # ---- synthesis for PnR ----
 synth: | $(BUILD)
-	$(YOSYS) -q -l $(BUILD)/synth.log -p "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
+	$(YOSYS) -q -l $(BUILD)/synth.log -p "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -abc9 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
 	@echo "=== flat stat ==="
 	@sed -n '/Number of cells/,/^$$/p' $(BUILD)/stat_flat.txt
 
