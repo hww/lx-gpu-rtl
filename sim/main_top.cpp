@@ -1,5 +1,7 @@
 #include "Vtb_top_wrapper.h"
+#include "Vtb_top_wrapper___024root.h"
 #include "verilated.h"
+#include "verilated_vcd_c.h"
 #include "image_io.h"
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +10,7 @@
 #include <string>
 
 static Vtb_top_wrapper* dut;
+static VerilatedVcdC* tfp_p = nullptr;
 static uint64_t cycles = 0;
 
 #define MEM_WORDS 32768
@@ -17,17 +20,20 @@ static uint16_t mem[MEM_WORDS];
 // Тактирование + эмуляция WB-памяти
 // ---------------------------------------------------------------------------
 static void step() {
-    // WB memory emulator (combinational before posedge)
     dut->wb_ack = 0;
     dut->wb_dat_i = 0;
     if (dut->wb_cyc && dut->wb_stb) {
         uint32_t a = (dut->wb_adr >> 1) & (MEM_WORDS - 1);
+        printf("WB: adr=%06X a=%04X we=%d dat_o=%04X mem=%04X\n",
+               (unsigned)dut->wb_adr, a, (int)dut->wb_we,
+               (unsigned)dut->wb_dat_o, mem[a]);
         if (dut->wb_we) mem[a] = dut->wb_dat_o;
         else           dut->wb_dat_i = mem[a];
         dut->wb_ack = 1;
     }
     dut->eval();
     dut->clk = 1; dut->eval();
+    if (tfp_p) tfp_p->dump(cycles);
     dut->clk = 0; dut->eval();
     ++cycles;
 }
@@ -165,8 +171,9 @@ static bool dump_mem_to_png(const char* path, PixelFormat fmt,
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vtb_top_wrapper;
-   
-    VerilatedVcdC tfp;
+
+    VerilatedVcdC tfp;      // локальный
+    tfp_p = &tfp;
     Verilated::traceEverOn(true);
     dut->trace(&tfp, 99);
     tfp.open("sim/trace.vcd");
@@ -189,7 +196,6 @@ int main(int argc, char** argv) {
     int         dout_w = 0, dout_h = 0;
 
     for (int i = 1; i < argc; i++) {
-        // старые
         if      (!strcmp(argv[i], "-p")     && i+1 < argc) prog = argv[++i];
         else if (!strcmp(argv[i], "-s1")    && i+1 < argc) s1 = argv[++i];
         else if (!strcmp(argv[i], "-s2")    && i+1 < argc) s2 = argv[++i];
@@ -199,7 +205,6 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "-doff")  && i+1 < argc) dst_off_raw = strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "-dsize") && i+1 < argc) dst_size_raw = strtoul(argv[++i], 0, 0);
 
-        // новые PNG-источники
         else if (!strcmp(argv[i], "-s1in")  && i+1 < argc) s1in_path = argv[++i];
         else if (!strcmp(argv[i], "-s1fmt") && i+1 < argc) {
             if (!parse_format(argv[++i], s1fmt)) { fprintf(stderr, "bad -s1fmt\n"); return 1; }
@@ -209,7 +214,6 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "-s1w")   && i+1 < argc) s1in_w = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s1h")   && i+1 < argc) s1in_h = atoi(argv[++i]);
 
-        // новые PNG-дампы
         else if (!strcmp(argv[i], "-dout")  && i+1 < argc) dout_path = argv[++i];
         else if (!strcmp(argv[i], "-dfmt")  && i+1 < argc) {
             if (!parse_format(argv[++i], dfmt)) { fprintf(stderr, "bad -dfmt\n"); return 1; }
@@ -225,19 +229,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Если задан -s1in, то -s1off означает PNG-смещение (перекрываем raw)
-    if (s1in_path) s1in_off = s1_off_raw;   // s1_off_raw сюда уже попал из -s1off
-    if (dout_path) dout_off = dst_off_raw;  // аналогично
+    if (s1in_path) s1in_off = s1_off_raw;
+    if (dout_path) dout_off = dst_off_raw;
 
     memset(mem, 0, sizeof(mem));
 
-    // reset
     dut->rst = 1; dut->start = 0;
     dut->rom_we = 0; dut->wb_ack = 0; dut->wb_dat_i = 0;
     step(); step();
     dut->rst = 0; step();
 
-    // ---- загрузка ROM ----
     if (prog) {
         FILE* f = fopen(prog, "r");
         if (!f) { fprintf(stderr, "cannot open %s\n", prog); return 1; }
@@ -254,23 +255,32 @@ int main(int argc, char** argv) {
         printf("loaded microcode %s (%u words)\n", prog, a);
     }
 
-    // ---- загрузка raw binaries (обратная совместимость) ----
     if (s1) load_file(s1, s1_off_raw);
     if (s2) load_file(s2, s2_off_raw);
 
-    // ---- загрузка PNG ----
     if (s1in_path) {
         size_t n_words = 0;
         if (!load_png_into_mem(s1in_path, s1fmt, s1in_off, s1in_w, s1in_h, n_words))
             return 1;
     }
 
-    // ---- старт ----
     dut->start = 1; step(); dut->start = 0;
 
-    // ---- прогон ----
+    // ---- прогон с отладкой первых 30 тактов ----
     uint64_t limit = 100000000ULL;
-    while (!dut->halted && !dut->error && cycles < limit) step();
+    while (!dut->halted && !dut->error && cycles < limit) {
+        if (cycles >= 0 && cycles < 1000) {
+printf("cyc=%2llu pc=%03X insn=%08X ad=%d hit=%d we=%d\n",
+    (unsigned long long)cycles,
+    (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__pc,
+    (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rom__DOT__data_r,
+    (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc__DOT__access_done_r,
+    (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_hit,
+    (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__we);
+        }
+        step();
+    }
+
 
     if (!dut->halted) {
         printf("FAIL: not halted (cycles=%llu)\n", (unsigned long long)cycles);
@@ -282,24 +292,24 @@ int main(int argc, char** argv) {
     }
     printf("HALTED: cycles=%llu\n", (unsigned long long)cycles);
 
-    // ---- существующая отладка ----   
     printf("registers R0..R31:\n");
-        for (int i = 0; i < 32; i++) {
-            printf("  R%02d = %06X\n", i, dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem_a[i]);
-    }           
+    for (int i = 0; i < 32; i++) {
+        printf("  R%02d = %04X\n", i, (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem_a[i]);
+    }
 
     printf("mem[0x000]=%04X mem[0x100]=%04X mem[0x180]=%04X mem[0x200]=%04X\n",
            mem[0x000], mem[0x100], mem[0x180], mem[0x200]);
 
-    // ---- дамп в raw (старое поведение) ----
     if (dst_raw) save_file(dst_raw, dst_off_raw, dst_size_raw);
 
-    // ---- дамп в PNG ----
     if (dout_path) {
         if (!dump_mem_to_png(dout_path, dfmt, dout_off, dout_w, dout_h))
             return 1;
     }
 
+    tfp_p = nullptr;
+    tfp.close();
     delete dut;
-    return 0;
+
+   return 0;
 }

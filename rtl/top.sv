@@ -1,7 +1,27 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// top: связка архитектурных узлов. Без логики.
+// top: связка архитектурных узлов.
+// Карта операндов (6 бит, 0..63):
+//   0..31   — R0..R31 (регистры, R/W)
+//   32..39  — системные:
+//     32 ZERO (R=0, W=ignore)
+//     33 FLAGS (R/W)
+//     34 SHADOW (R/W)
+//     35 LOOP.CNT (R/W)
+//     36 LOOP.TGT (R/W)
+//     37 BUSY (R only)
+//     38 MHI (R only)
+//     39 reserved
+//   40..43  — DATA[0..3] (R/W)
+//   44..47  — reserved
+//   48..63  — каналы 4×4 (только W):
+//     48 + 4*ch + 0: IDX      (W)
+//     48 + 4*ch + 1: IDXH     (W)
+//     48 + 4*ch + 2: STEP     (W)
+//     48 + 4*ch + 3: MODE_PAGE (W, {PAGE[7:0], MODE[7:0]})
+//   FLUSH — CTRL class, reg_op=7, imm12[1:0] = channel.
+//   Спецоперанд-приёмник только в MOV (C3a).
 module top (
     input  logic        clk,
     input  logic        rst,
@@ -79,6 +99,8 @@ module top (
         .res(alu_res), .mhi(alu_mhi), .nowrite(alu_nowrite),
         .z(alu_z), .n(alu_n), .c(alu_c), .v(alu_v)
     );
+    // ===== ack (объявляем до инстанса sequencer) =====
+    logic ack;
 
     // ===== sequencer =====
     logic [11:0] pc_next, error_code;
@@ -99,7 +121,7 @@ module top (
         .loop_cnt(loop_cnt), .loop_tgt(loop_tgt),
         .halted(halted), .error(error), .error_code(error_code),
         .irq_pending(irq_pending), .irq_code(irq_code),
-        .stall(stall),
+        .ack(ack),
         .loop_cnt_we(1'b0), .loop_cnt_in(16'h0),
         .loop_tgt_we(1'b0), .loop_tgt_in(12'h0)
     );
@@ -116,9 +138,17 @@ module top (
     logic [15:0] pe_step_in;
     logic        pe_access;
     logic [14:0] pe_word_out;
+    logic [14:0] pe_word_next;    
     logic [3:0]  pe_pos;
+    logic [3:0]  pe_pos_next;   
     logic [2:0]  pe_mode;
     logic        pe_prefetch_req;
+
+    // access_done для pixel_engine: не инкрементируем idx, если слово сменилось
+    // (иначе лишний инкремент на такте hit старого слова).
+    logic pe_access_done_eff;
+    assign pe_access_done_eff = gc_access_done && !word_changed;
+        
     pixel_engine pe (
         .clk(clk), .rst(rst),
         .ch(pe_ch),
@@ -127,14 +157,18 @@ module top (
         .idx_we(pe_idx_we), .idx_in(pe_idx_in),
         .step_we(pe_step_we), .step_in(pe_step_in),
         .access(pe_access),
-        .word_out(pe_word_out), .pos(pe_pos), .mode(pe_mode),
+        .access_done(pe_access_done_eff),
+        .word_out(pe_word_out), .word_next(pe_word_next), 
+        .pos(pe_pos), .pos_next(pe_pos_next), .mode(pe_mode),
         .prefetch_req(pe_prefetch_req)
     );
+
+
 
     // ===== gpu_cache =====
     logic        gc_page_we;
     logic [7:0]  gc_page_in;
-    logic [7:0]  gc_page_out;      // read PAGE
+    logic [7:0]  gc_page_out;
     logic        gc_flush_en;
     logic [1:0]  gc_flush_ch;
     logic        gc_flush_done;
@@ -178,7 +212,14 @@ module top (
     );
 
     assign pb_mode     = pe_mode;
-    assign pb_pos      = pe_pos;
+    // ack для DATA-чтения: только если слово не сменилось ИЛИ данные нового слова уже пришли.
+    // Если слово сменилось (word_changed=1), ждём fill нового слова: ack=0.
+    // gc_access_done после fill нового слова = 1, и тогда word_changed уже 0 (idx инкрементирован).
+    logic word_changed;
+    assign word_changed = (pe_word_out != pe_word_next);
+
+
+    assign pb_pos      = (gc_access_done && !word_changed) ? pe_pos_next : pe_pos;
     assign pb_word_in  = gc_rdata;
     assign pb_pixel_in = alu_res;
 
@@ -203,36 +244,29 @@ module top (
 
     // ===== special read =====
     logic [15:0] sp_rd;
-    logic [2:0]  kind_sel;
-    assign kind_sel = src_code[2:0];
 
     always_comb begin
         sp_rd = 16'h0;
+
         if (src_code >= 6'd32 && src_code < 6'd40) begin
             // системные 32..39
             case (src_code)
-                6'd32: sp_rd = 16'h0;
-                6'd33: sp_rd = {12'h0, v_r, c_r, n_r, z_r};
-                6'd34: sp_rd = shadow;
-                6'd35: sp_rd = loop_cnt;
-                6'd36: sp_rd = {4'h0, loop_tgt};
-                6'd37: sp_rd = {12'h0, gc_wb_cyc, gc_flush_en, pe_prefetch_req, gc_access};
-                6'd38: sp_rd = alu_mhi;
-                6'd39: sp_rd = 16'h0;  // reserved (FLUSH теперь CTRL)
+                6'd32: sp_rd = 16'h0;                              // ZERO
+                6'd33: sp_rd = {12'h0, v_r, c_r, n_r, z_r};        // FLAGS
+                6'd34: sp_rd = shadow;                             // SHADOW
+                6'd35: sp_rd = loop_cnt;                           // LOOP.CNT
+                6'd36: sp_rd = {4'h0, loop_tgt};                   // LOOP.TGT
+                6'd37: sp_rd = {12'h0, gc_wb_cyc, gc_flush_done, gc_access_done, gc_hit};  // BUSY
+                6'd38: sp_rd = alu_mhi;                            // MHI
+                6'd39: sp_rd = 16'h0;                              // reserved
                 default: sp_rd = 16'h0;
             endcase
-        end else if (src_code >= 6'd40) begin
-            // каналы 40..63
-            pe_ch = src_code[4:3];
-            case (kind_sel)
-                3'd3: sp_rd = {13'h0, pe_mode};
-                3'd4: sp_rd = {8'h0, gc_page_out};
-                3'd5: begin
-                    pb_read = 1'b1;
-                    sp_rd = pb_pixel_out;
-                end
-                default: sp_rd = 16'h0;
-            endcase
+        end else if (src_code >= 6'd40 && src_code < 6'd44) begin
+            // DATA[0..3] — read pixel
+            sp_rd = pb_pixel_out;
+        end else begin
+            // 48..63 — каналы (только W). Чтение = 0.
+            sp_rd = 16'h0;
         end
     end
 
@@ -246,9 +280,21 @@ module top (
     assign alu_op = reg_op;
 
     // ===== writeback (R0..R31) =====
-    assign we    = !is_ctrl && !alu_nowrite && (dst_code < 6'd32);
+    // Протокол: ack — однотактовый строп от каждого устройства.
+    // top.sv собирает AND всех ack. we — импульс по ack.
+    logic is_data_read;
+    assign is_data_read = !is_ctrl && (src_code >= 6'd40 && src_code < 6'd44);
+
+    // ack от устройств (объявлен выше, до инстанса sequencer):
+    //   DATA-чтение  -> ждём gc_access_done (строп от кэша)
+    //   всё остальное -> 1 (регистр/ALU мгновенно, FLUSH — фоновый)
+    assign ack = is_data_read ? (gc_access_done && !word_changed) : 1'b1;
+
+    // we — импульс по ack, только для MOV в R0..R31
+    assign we    = ack && !is_ctrl && !is_flush && !alu_nowrite && (dst_code < 6'd32);
     assign wa    = dst[4:0];
     assign wdata = alu_res;
+
 
     // ===== special write (dst_code >= 32, only MOV) =====
     logic is_mov;
@@ -269,31 +315,50 @@ module top (
         gc_access = 1'b0; gc_we = 1'b0; gc_wdata = 16'h0;
         pb_read = 1'b0;
 
+        // --- special write (only MOV, dst_code >= 32) ---
         if (is_mov && dst_code >= 6'd32) begin
-            pe_ch = dst_code[4:3];
-            case (dst_code[2:0])
-                3'd0: begin pe_idxh_we = 1'b1; pe_idxh_in = alu_res[2:0]; end
-                3'd1: begin pe_idx_we  = 1'b1; pe_idx_in  = alu_res[15:0]; end
-                3'd2: begin pe_step_we = 1'b1; pe_step_in = alu_res[15:0]; end
-                3'd3: begin pe_mode_we = 1'b1; pe_mode_in = alu_res[2:0]; end
-                3'd4: begin gc_page_we = 1'b1; gc_page_in = alu_res[7:0]; end
-                3'd5: begin gc_access = 1'b1; gc_we = 1'b1; gc_wdata = alu_res; end
-                default: ;
-            endcase
+            if (dst_code < 6'd40) begin
+                // системные 32..39: только FLAGS, SHADOW, LOOP.CNT, LOOP.TGT (R/W)
+                // ZERO/BUSY/MHI — игнор
+            end else if (dst_code < 6'd44) begin
+                // DATA[0..3] (40..43): write
+                pe_ch = dst_code[1:0];
+                gc_access = 1'b1;
+                gc_we = 1'b1;
+                gc_wdata = alu_res;
+            end else if (dst_code >= 6'd48) begin
+                // каналы (48..63): 4 вида
+                pe_ch = dst_code[3:2];
+                case (dst_code[1:0])
+                    2'd0: begin pe_idx_we  = 1'b1; pe_idx_in  = alu_res[15:0]; end
+                    2'd1: begin pe_idxh_we = 1'b1; pe_idxh_in = alu_res[2:0];  end
+                    2'd2: begin pe_step_we = 1'b1; pe_step_in = alu_res[15:0]; end
+                    2'd3: begin
+                        pe_mode_we = 1'b1; pe_mode_in = alu_res[2:0];
+                        gc_page_we = 1'b1; gc_page_in = alu_res[15:8];
+                    end
+                endcase
+            end
         end
 
-        // FLUSH: CTRL class, reg_op=7, imm12[1:0] = channel
+        // --- DATA read (src_code 40..43) ---
+        if (!is_ctrl && src_code >= 6'd40 && src_code < 6'd44) begin
+            pe_ch = src_code[1:0];
+            gc_access = 1'b1;
+            gc_we = 1'b0;
+            pe_access = 1'b1;
+            pb_read = 1'b1;
+        end
+
+        // --- FLUSH: CTRL, reg_op=7, imm12[1:0] = channel ---
         if (is_flush) begin
             gc_flush_en = 1'b1;
             gc_flush_ch = imm12[1:0];
         end
     end
 
-    // ===== stall =====
-    assign stall = !halted && !error && (
-        (gc_access && !gc_access_done) ||
-        (is_flush && !gc_flush_done)
-    );
+    // ===== ack для sequencer'а =====
+    // stalled больше нет: pc шагает по ack, а не по !stall.
 
     // ===== JMPR target =====
     assign jmpr_target = alu_res[11:0];

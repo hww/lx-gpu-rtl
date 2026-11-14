@@ -45,7 +45,7 @@ module sequencer (
     output logic [11:0] irq_code,
 
     input  logic        start,
-    input  logic        stall,
+    input  logic        ack,
 
     // test-only: write LOOP.CNT / LOOP.TGT
     input  logic        loop_cnt_we,
@@ -151,8 +151,8 @@ module sequencer (
             error_code  <= 12'h0;
             irq_pending <= 1'b0;
             irq_code    <= 12'h0;
-        end else if (halted || error || stall) begin
-            // stay put
+        end else if (halted || error || !ack) begin
+            // stay put: ждём ack от устройств
         end else begin
             pc <= pc_next_c;
 

@@ -1,4 +1,6 @@
 `timescale 1ns/1ps
+`default_nettype none
+
 module tb_top_wrapper (
     input  logic        clk,
     input  logic        rst,
@@ -8,7 +10,6 @@ module tb_top_wrapper (
     input  logic        rom_we,
     input  logic [11:0] rom_addr,
     input  logic [31:0] rom_wdata,
-    // Wishbone master (pixel_buffer <-> C++ memory)
     output logic        wb_cyc,
     output logic        wb_stb,
     output logic        wb_we,

@@ -17,8 +17,11 @@ module pixel_engine (
     input  logic [15:0] step_in,
 
     input  logic        access,
+    input  logic        access_done,   // импульс: один такт, когда данные готовы
     output logic [14:0] word_out,
+    output logic [14:0] word_next,   
     output logic [3:0]  pos,
+    output logic [3:0]  pos_next,
     output logic [2:0]  mode,
     output logic        prefetch_req
 );
@@ -53,8 +56,16 @@ module pixel_engine (
 
     // word_out = целая часть (15 бит), pos = дробная часть >> shift_left
     assign word_out = idx_stored[18:4];
+    assign word_next = idx_stored_next[18:4];   // слово ПОСЛЕ инкремента
     assign pos      = idx_stored[3:0] >> shift_left;
     assign mode     = mode_r[ch];
+
+    // pos_next — позиция ПОСЛЕ инкремента по access_done.
+    // Используется в top.sv на такте access_done, когда пришли данные
+    // для нового слова: позиция уже должна быть новой (следующий пиксель).
+    logic [18:0] idx_stored_next;
+    assign idx_stored_next = idx_next;  // idx_stored + step_stored
+    assign pos_next = idx_stored_next[3:0] >> shift_left;
 
     // Запись IDX: value = {idxh_r[ch], idx_in} = 19 целых.
     // stored = (value << 4) >> k, обрезаем до 19 бит.
@@ -71,10 +82,20 @@ module pixel_engine (
     logic [18:0] idx_next;
     assign idx_next = idx_stored + step_stored;
 
+    integer j;
     always_ff @(posedge clk) begin
-        if (idx_we)       idx_step_mem[{ch, 1'b0}] <= idx_write_val;
-        else if (access)  idx_step_mem[{ch, 1'b0}] <= idx_next;
-        if (step_we)      idx_step_mem[{ch, 1'b1}] <= step_write_val;
+        if (rst) begin
+            for (j = 0; j < 8; j++) idx_step_mem[j] <= 19'h0;
+        end else begin
+            if (idx_we) begin
+                $display("IDX write: ch=%d mode=%d k=%d idx_in=%h write_val=%h",
+                         ch, mode_r[ch], k, idx_in, idx_write_val);
+                idx_step_mem[{ch, 1'b0}] <= idx_write_val;
+            end else if (access_done) begin
+                idx_step_mem[{ch, 1'b0}] <= idx_next;
+            end
+            if (step_we) idx_step_mem[{ch, 1'b1}] <= step_write_val;
+        end
     end
 
     // MODE регистры
@@ -106,6 +127,11 @@ module pixel_engine (
         else     word_prev <= word_out;
     end
 
-    assign prefetch_req = idx_we || (access && (word_out != word_prev));
+    logic idx_we_d;
+    always_ff @(posedge clk) begin
+        if (rst) idx_we_d <= 1'b0;
+        else     idx_we_d <= idx_we;
+    end
+    assign prefetch_req = idx_we_d || (access && (word_out != word_prev));
 
 endmodule

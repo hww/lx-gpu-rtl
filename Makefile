@@ -24,13 +24,14 @@ sim-cpp-top:
 	mkdir -p $(BUILD)/sim_top
 	verilator --cc --exe --build -j 1 \
 	    -DSIMULATION \
-	    -CFLAGS "-I$(CURDIR)/third_party/stb" \
+	    -CFLAGS "-I$(CURDIR)/third_party/stb -I$(CURDIR)/sim" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --trace \
 	    --top-module tb_top_wrapper \
 	    -Mdir $(CURDIR)/$(BUILD)/sim_top \
-	    rtl/*.sv sim/tb_top_wrapper.sv sim/memory_arbiter_stub.sv \
-	    $(CURDIR)/sim/main_top.cpp $(CURDIR)/$(IMAGE_IO_SRC)
+	    rtl/alu.sv rtl/regfile.sv rtl/sequencer.sv rtl/microcode_rom.sv \
+	    rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/top.sv \
+	    sim/tb_top_wrapper.sv $(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
 	./$(BUILD)/sim_top/Vtb_top_wrapper
 
 # ---- synthesis for PnR ----
@@ -112,3 +113,23 @@ sim-pixel-engine-cpp:
 	    -Mdir $(CURDIR)/$(BUILD)/sim_pixel_engine \
 	    rtl/pixel_engine.sv $(CURDIR)/sim/tb_pixel_engine.cpp
 	./$(BUILD)/sim_pixel_engine/Vpixel_engine
+
+sim-pixel-blender-cpp:
+	mkdir -p $(BUILD)/sim_pixel_blender
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module pixel_blender \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_pixel_blender \
+	    rtl/pixel_blender.sv $(CURDIR)/sim/tb_pixel_blender.cpp
+	./$(BUILD)/sim_pixel_blender/Vpixel_blender
+
+sim-gpu-cache-cpp:
+	mkdir -p $(BUILD)/sim_gpu_cache
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module gpu_cache \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_gpu_cache \
+	    rtl/gpu_cache.sv $(CURDIR)/sim/tb_gpu_cache.cpp
+	./$(BUILD)/sim_gpu_cache/Vgpu_cache
