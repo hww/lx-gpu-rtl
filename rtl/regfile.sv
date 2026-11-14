@@ -8,20 +8,20 @@ module regfile (
     input  logic        clk,
     input  logic        rst,        // не используется: EBR не сбрасывается
     input  logic [4:0]  ra,
-    output logic [23:0] rdata_a,
+    output logic [15:0] rdata_a,
     input  logic [4:0]  rb,
-    output logic [23:0] rdata_b,
+    output logic [15:0] rdata_b,
     input  logic        we,
     input  logic [4:0]  wa,
-    input  logic [23:0] wdata
+    input  logic [15:0] wdata
 );
 
-    (* ram_style = "block", no_rw_check *) logic [23:0] mem_a [0:31];
-    (* ram_style = "block", no_rw_check *) logic [23:0] mem_b [0:31];
+    (* ram_style = "block", no_rw_check *) logic [15:0] mem_a [0:31];
+    (* ram_style = "block", no_rw_check *) logic [15:0] mem_b [0:31];
 
-    logic [23:0] q_a, q_b;
+    logic [15:0] q_a, q_b;
     logic        byp_a, byp_b;
-    logic [23:0] wdata_r;
+    logic [15:0] wdata_r;
 
     initial begin
         for (int i = 0; i < 32; i++) begin

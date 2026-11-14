@@ -77,6 +77,20 @@ module top (
     logic z, n, c, v;
     assign z = z_r; assign n = n_r; assign c = c_r; assign v = v_r;
 
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            z_r <= 1'b0;
+            n_r <= 1'b0;
+            c_r <= 1'b0;
+            v_r <= 1'b0;
+        end else if (ack && f) begin
+            z_r <= alu_z;
+            n_r <= alu_n;
+            c_r <= alu_c;
+            v_r <= alu_v;
+        end
+    end
+    
     // ===== register file =====
     logic [4:0]  ra, rb, wa;
     logic [15:0] rdata_a, rdata_b, wdata;

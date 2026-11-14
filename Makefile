@@ -6,21 +6,24 @@ PACKAGE  := CABGA256
 LPF      := icesugar_pro.lpf
 BUILD    := build
 
-RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_packer.sv rtl/addr_packer.sv \
-       rtl/pixel_buffer.sv rtl/sequencer.sv rtl/microcode_rom.sv rtl/top.sv
+# RTL for synthesis (top_fpga is the FPGA top; top.sv is included since top_fpga instantiates it)
+RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_blender.sv rtl/pixel_engine.sv \
+       rtl/gpu_cache.sv rtl/sequencer.sv rtl/microcode_rom.sv \
+       rtl/top.sv rtl/top_fpga.sv
 
-# top_fpga ещё нет; когда появится — добавь в RTL и замени top -> top_fpga
-TOP  := top
+TOP := top_fpga
 
-.PHONY: all synth pnr bit clean sim-cpp-top stat-hier yosys
+.PHONY: all synth pnr bit clean stat-hier yosys \
+        sim-top sim-sequencer sim-alu sim-pixel-engine sim-pixel-blender \
+        sim-gpu-cache sim-image-roundtrip
 
 all: bit
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-# ---- simulation ----
-sim-cpp-top:
+# ---- simulation (Verilator) ----
+sim-top:
 	mkdir -p $(BUILD)/sim_top
 	verilator --cc --exe --build -j 1 \
 	    -DSIMULATION \
@@ -34,9 +37,71 @@ sim-cpp-top:
 	    sim/tb_top_wrapper.sv $(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
 	./$(BUILD)/sim_top/Vtb_top_wrapper
 
+sim-sequencer:
+	mkdir -p $(BUILD)/sim_sequencer
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module sequencer \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_sequencer \
+	    rtl/sequencer.sv $(CURDIR)/sim/tb_sequencer.cpp
+	./$(BUILD)/sim_sequencer/Vsequencer
+
+sim-alu:
+	mkdir -p $(BUILD)/sim_alu
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module alu \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_alu \
+	    rtl/alu.sv $(CURDIR)/sim/tb_alu.cpp
+	./$(BUILD)/sim_alu/Valu
+
+sim-pixel-engine:
+	mkdir -p $(BUILD)/sim_pixel_engine
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module pixel_engine \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_pixel_engine \
+	    rtl/pixel_engine.sv $(CURDIR)/sim/tb_pixel_engine.cpp
+	./$(BUILD)/sim_pixel_engine/Vpixel_engine
+
+sim-pixel-blender:
+	mkdir -p $(BUILD)/sim_pixel_blender
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module pixel_blender \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_pixel_blender \
+	    rtl/pixel_blender.sv $(CURDIR)/sim/tb_pixel_blender.cpp
+	./$(BUILD)/sim_pixel_blender/Vpixel_blender
+
+sim-gpu-cache:
+	mkdir -p $(BUILD)/sim_gpu_cache
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module gpu_cache \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_gpu_cache \
+	    rtl/gpu_cache.sv $(CURDIR)/sim/tb_gpu_cache.cpp
+	./$(BUILD)/sim_gpu_cache/Vgpu_cache
+
+# ---- image roundtrip (host-only, no Verilator) ----
+IMAGE_IO_SRC := sim/image_io.cpp
+STB_FLAGS    := -Ithird_party/stb -DSIMULATION
+
+sim-image-roundtrip:
+	mkdir -p $(BUILD)/sim_image_roundtrip
+	g++ -std=c++17 -O2 -Wall $(STB_FLAGS) \
+	    -o $(BUILD)/sim_image_roundtrip/image_roundtrip \
+	    sim/main_image_roundtrip.cpp $(IMAGE_IO_SRC)
+	./$(BUILD)/sim_image_roundtrip/image_roundtrip
+
 # ---- synthesis for PnR ----
 synth: | $(BUILD)
-	$(YOSYS) -q -l $(BUILD)/synth.log -p "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -abc9 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
+	$(YOSYS) -q -l $(BUILD)/synth.log -p \
+	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -abc9 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
 	@echo "=== flat stat ==="
 	@sed -n '/Number of cells/,/^$$/p' $(BUILD)/stat_flat.txt
 
@@ -49,7 +114,8 @@ bit: pnr
 
 # ---- hierarchical stat (per-module) ----
 stat-hier: | $(BUILD)
-	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
+	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p \
+	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
 	@echo "Full report: $(BUILD)/stat_hier.txt"
 	@awk '/^=== /{m=$$2} \
 	      /LUT4/{l[m]=$$2} /TRELLIS_FF/{f[m]=$$2} /DP16KD/{d[m]=$$2} /MULT18X18D/{x[m]=$$2} \
@@ -65,71 +131,14 @@ clean:
 	rm -rf $(BUILD)
 
 
-# --- image I/O (stb + обёртка) ---
-IMAGE_IO_SRC := sim/image_io.cpp
-IMAGE_IO_HDR := sim/image_io.h third_party/stb/stb_image.h third_party/stb/stb_image_write.h
-STB_FLAGS    := -Ithird_party/stb -DSIMULATION
+# ---- Assembly ----
+ASM := python3 tools/asm.py
 
-# --- roundtrip test: PNG -> pack -> mem -> unpack -> PNG (без GPU) ---
-sim-image-roundtrip:
-	mkdir -p $(BUILD)/sim_image_roundtrip
-	g++ -std=c++17 -O2 -Wall $(STB_FLAGS) \
-	    -o $(BUILD)/sim_image_roundtrip/image_roundtrip \
-	    sim/main_image_roundtrip.cpp $(IMAGE_IO_SRC)
-	./$(BUILD)/sim_image_roundtrip/image_roundtrip
+sim/sprite_16x16.png:
+	python3 tools/gen_sprite.py
 
+sim/test_sprite.hex: sim/test_sprite.asm tools/asm.py
+	$(ASM) sim/test_sprite.asm > sim/test_sprite.hex
 
-
-.PHONY: sim-image-roundtrip
-
-sim-sequencer-cpp:
-	mkdir -p $(BUILD)/sim_sequencer
-	verilator --cc --exe --build -j 1 \
-	    -DSIMULATION \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module sequencer \
-	    -Mdir $(CURDIR)/$(BUILD)/sim_sequencer \
-	    rtl/sequencer.sv $(CURDIR)/sim/tb_sequencer.cpp
-	./$(BUILD)/sim_sequencer/Vsequencer
-
-sim-alu-cpp:
-	mkdir -p $(BUILD)/sim_alu
-	verilator --cc --exe --build -j 1 \
-	    -DSIMULATION \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module alu \
-	    -Mdir $(CURDIR)/$(BUILD)/sim_alu \
-	    rtl/alu.sv $(CURDIR)/sim/tb_alu.cpp
-	./$(BUILD)/sim_alu/Valu
-
-
-
-sim-pixel-engine-cpp:
-	mkdir -p $(BUILD)/sim_pixel_engine
-	verilator --cc --exe --build -j 1 \
-	    -DSIMULATION \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module pixel_engine \
-	    -Mdir $(CURDIR)/$(BUILD)/sim_pixel_engine \
-	    rtl/pixel_engine.sv $(CURDIR)/sim/tb_pixel_engine.cpp
-	./$(BUILD)/sim_pixel_engine/Vpixel_engine
-
-sim-pixel-blender-cpp:
-	mkdir -p $(BUILD)/sim_pixel_blender
-	verilator --cc --exe --build -j 1 \
-	    -DSIMULATION \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module pixel_blender \
-	    -Mdir $(CURDIR)/$(BUILD)/sim_pixel_blender \
-	    rtl/pixel_blender.sv $(CURDIR)/sim/tb_pixel_blender.cpp
-	./$(BUILD)/sim_pixel_blender/Vpixel_blender
-
-sim-gpu-cache-cpp:
-	mkdir -p $(BUILD)/sim_gpu_cache
-	verilator --cc --exe --build -j 1 \
-	    -DSIMULATION \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module gpu_cache \
-	    -Mdir $(CURDIR)/$(BUILD)/sim_gpu_cache \
-	    rtl/gpu_cache.sv $(CURDIR)/sim/tb_gpu_cache.cpp
-	./$(BUILD)/sim_gpu_cache/Vgpu_cache
+sprite: sim/sprite_16x16.png sim/test_sprite.hex
+	@echo "sprite ready"

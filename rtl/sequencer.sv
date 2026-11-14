@@ -78,8 +78,6 @@ module sequencer (
     endfunction
 
     // ===== CTRL op codes =====
-    // Используем `define, а не localparam: Verilator не поддерживает
-    // localparam с тем же именем, что и метка case.
     `define OP_NOP   5'd0
     `define OP_JMP   5'd1
     `define OP_CALL  5'd2
@@ -132,6 +130,16 @@ module sequencer (
 
     assign pc_next = pc_next_c;
 
+    // ===== branch flush =====
+    // На такте перехода (pc_next_c != pc+1) взводим flush=1.
+    // На следующем такте insn = mem[старого pc] (невалидна), исполнение
+    // подавляется; pc уже загружен на прошлом такте.
+    logic flush;
+    always_ff @(posedge clk) begin
+        if (rst || start) flush <= 1'b0;
+        else              flush <= (pc_next_c != pc + 12'd1);
+    end
+
     // ===== state =====
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -153,6 +161,9 @@ module sequencer (
             irq_code    <= 12'h0;
         end else if (halted || error || !ack) begin
             // stay put: ждём ack от устройств
+        end else if (flush) begin
+            // insn = mem[старого pc], невалидна. PC уже загружен на прошлом такте.
+            // Пропускаем такт: не исполняем insn, не трогаем side-effects.
         end else begin
             pc <= pc_next_c;
 

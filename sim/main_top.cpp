@@ -278,13 +278,12 @@ int main(int argc, char** argv) {
     uint64_t limit = 100000000ULL;
     while (!dut->halted && !dut->error && cycles < limit) {
         if (cycles >= 0 && cycles < 1000) {
-printf("cyc=%2llu pc=%03X insn=%08X ad=%d hit=%d we=%d\n",
-    (unsigned long long)cycles,
-    (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__pc,
-    (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rom__DOT__data_r,
-    (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc__DOT__access_done_r,
-    (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_hit,
-    (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__we);
+  printf("cyc=%4llu pc=%03X insn=%08X r2=%04X z=%d\n",
+        (unsigned long long)cycles,
+        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__pc,
+        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rom__DOT__data_r,
+        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem_a[2],
+        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__z_r);
         }
         step();
     }
