@@ -66,3 +66,5 @@ vc_hdrs.h
 
 build/
 
+# Combiner artefacts
+combined_code.txt

@@ -19,9 +19,7 @@ module pixel_engine (
     input  logic        access,
     input  logic        access_done,   // импульс: один такт, когда данные готовы
     output logic [14:0] word_out,
-    output logic [14:0] word_next,   
     output logic [3:0]  pos,
-    output logic [3:0]  pos_next,
     output logic [2:0]  mode,
     output logic        prefetch_req
 );
@@ -56,16 +54,8 @@ module pixel_engine (
 
     // word_out = целая часть (15 бит), pos = дробная часть >> shift_left
     assign word_out = idx_stored[18:4];
-    assign word_next = idx_stored_next[18:4];   // слово ПОСЛЕ инкремента
     assign pos      = idx_stored[3:0] >> shift_left;
     assign mode     = mode_r[ch];
-
-    // pos_next — позиция ПОСЛЕ инкремента по access_done.
-    // Используется в top.sv на такте access_done, когда пришли данные
-    // для нового слова: позиция уже должна быть новой (следующий пиксель).
-    logic [18:0] idx_stored_next;
-    assign idx_stored_next = idx_next;  // idx_stored + step_stored
-    assign pos_next = idx_stored_next[3:0] >> shift_left;
 
     // Запись IDX: value = {idxh_r[ch], idx_in} = 19 целых.
     // stored = (value << 4) >> k, обрезаем до 19 бит.

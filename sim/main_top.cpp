@@ -31,10 +31,18 @@ static void step() {
         else           dut->wb_dat_i = mem[a];
         dut->wb_ack = 1;
     }
+
     dut->eval();
-    dut->clk = 1; dut->eval();
     if (tfp_p) tfp_p->dump(cycles);
-    dut->clk = 0; dut->eval();
+
+    dut->clk = 1; 
+    dut->eval();
+    if (tfp_p) tfp_p->dump(cycles);
+    
+    dut->clk = 0; 
+    dut->eval();  
+    if (tfp_p) tfp_p->dump(cycles);
+
     ++cycles;
 }
 

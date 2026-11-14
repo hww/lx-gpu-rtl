@@ -10,12 +10,14 @@ module microcode_rom #(
     parameter int DATA_W    = 32,
     parameter     INIT_FILE = ""
 ) (
+    input  logic              rst,
     input  logic              clk,
     input  logic [ADDR_W-1:0] addr,
     output logic [DATA_W-1:0] data,
     input  logic              we,
     input  logic [ADDR_W-1:0] waddr,
-    input  logic [DATA_W-1:0] wdata
+    input  logic [DATA_W-1:0] wdata,
+    input  logic              ack
 );
 
     (* no_rw_check *)
@@ -34,9 +36,11 @@ module microcode_rom #(
     // Port B: read, 1-cycle latency
     // (было: addr_r <= addr; data_r <= mem[addr_r]; — 2 такта)
     // (стало: data_r <= mem[addr]; — 1 такт)
+    // Port B: read, защёлкивается по ack
     logic [DATA_W-1:0] data_r;
     always_ff @(posedge clk) begin
-        data_r <= mem[addr];
+        if (rst)        data_r <= '0;
+        else if (ack)   data_r <= mem[addr];  // <-- только по ack!
     end
     assign data = data_r;
 

@@ -46,7 +46,7 @@ module top (
     logic [31:0] insn;
     microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32), .INIT_FILE("rtl/bootloader.hex")) rom (
         .clk(clk), .addr(pc), .data(insn),
-        .we(rom_we), .waddr(rom_addr), .wdata(rom_wdata)
+        .we(rom_we), .waddr(rom_addr), .wdata(rom_wdata), .ack(ack), .rst(rst)
     );
 
     // ===== decode =====
@@ -138,17 +138,10 @@ module top (
     logic [15:0] pe_step_in;
     logic        pe_access;
     logic [14:0] pe_word_out;
-    logic [14:0] pe_word_next;    
     logic [3:0]  pe_pos;
-    logic [3:0]  pe_pos_next;   
     logic [2:0]  pe_mode;
     logic        pe_prefetch_req;
 
-    // access_done для pixel_engine: не инкрементируем idx, если слово сменилось
-    // (иначе лишний инкремент на такте hit старого слова).
-    logic pe_access_done_eff;
-    assign pe_access_done_eff = gc_access_done && !word_changed;
-        
     pixel_engine pe (
         .clk(clk), .rst(rst),
         .ch(pe_ch),
@@ -157,9 +150,9 @@ module top (
         .idx_we(pe_idx_we), .idx_in(pe_idx_in),
         .step_we(pe_step_we), .step_in(pe_step_in),
         .access(pe_access),
-        .access_done(pe_access_done_eff),
-        .word_out(pe_word_out), .word_next(pe_word_next), 
-        .pos(pe_pos), .pos_next(pe_pos_next), .mode(pe_mode),
+        .access_done(pb_ack),          // idx инкрементируется по ack блендера
+        .word_out(pe_word_out),
+        .pos(pe_pos), .mode(pe_mode),
         .prefetch_req(pe_prefetch_req)
     );
 
@@ -200,28 +193,30 @@ module top (
     );
 
     // ===== pixel_blender =====
+    logic        pb_start;
     logic        pb_read;
     logic [2:0]  pb_mode;
     logic [3:0]  pb_pos;
     logic [15:0] pb_word_in, pb_pixel_in;
     logic [15:0] pb_pixel_out, pb_word_out;
+    logic        pb_ack;
+    logic        pb_busy;
     pixel_blender pb (
+        .clk(clk), .rst(rst),
+        .start(pb_start),
         .read(pb_read), .mode(pb_mode), .pos(pb_pos),
         .word_in(pb_word_in), .pixel_in(pb_pixel_in),
-        .pixel_out(pb_pixel_out), .word_out(pb_word_out)
+        .pixel_out(pb_pixel_out), .word_out(pb_word_out),
+        .ack(pb_ack), .busy(pb_busy)
     );
 
     assign pb_mode     = pe_mode;
-    // ack для DATA-чтения: только если слово не сменилось ИЛИ данные нового слова уже пришли.
-    // Если слово сменилось (word_changed=1), ждём fill нового слова: ack=0.
-    // gc_access_done после fill нового слова = 1, и тогда word_changed уже 0 (idx инкрементирован).
-    logic word_changed;
-    assign word_changed = (pe_word_out != pe_word_next);
-
-
-    assign pb_pos      = (gc_access_done && !word_changed) ? pe_pos_next : pe_pos;
-    assign pb_word_in  = gc_rdata;
+    assign pb_pos      = pe_pos;          // текущая позиция (не next)
+    assign pb_word_in  = gc_rdata;        // данные из кэша
     assign pb_pixel_in = alu_res;
+
+    // start от кэша: данные валидны
+    assign pb_start    = gc_access_done;
 
     // ===== Wishbone =====
     assign wb_cyc   = gc_wb_cyc;
@@ -285,15 +280,13 @@ module top (
     logic is_data_read;
     assign is_data_read = !is_ctrl && (src_code >= 6'd40 && src_code < 6'd44);
 
-    // ack от устройств (объявлен выше, до инстанса sequencer):
-    //   DATA-чтение  -> ждём gc_access_done (строп от кэша)
-    //   всё остальное -> 1 (регистр/ALU мгновенно, FLUSH — фоновый)
-    assign ack = is_data_read ? (gc_access_done && !word_changed) : 1'b1;
+    // ack: для DATA-операций — от блендера (pb_ack), иначе — сразу.
+    assign ack = is_data_read ? pb_ack : 1'b1;
 
     // we — импульс по ack, только для MOV в R0..R31
     assign we    = ack && !is_ctrl && !is_flush && !alu_nowrite && (dst_code < 6'd32);
     assign wa    = dst[4:0];
-    assign wdata = alu_res;
+    assign wdata = is_data_read ? pb_pixel_out : alu_res;   // для DATA — из блендера
 
 
     // ===== special write (dst_code >= 32, only MOV) =====
