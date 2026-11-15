@@ -56,11 +56,11 @@ module pixel_blender (
                 mask  = 16'h0003 << shift;
             end
             3'd2: begin
-                shift = ({1'b0, 2'd3} - {1'b0, r_pos[1:0]}) * 4;
+                shift = ({2'b0, 2'd3} - {2'b0, r_pos[1:0]}) * 4;
                 mask  = 16'h000F << shift;
             end
             3'd3: begin
-                shift = ({1'b0, 1'b1} - {1'b0, r_pos[0]}) * 8;
+                shift = ({3'b0, 1'b1} - {3'b0, r_pos[0]}) * 8;
                 mask  = 16'h00FF << shift;
             end
             3'd4: begin
@@ -118,8 +118,8 @@ module pixel_blender (
                     // на этом такте вычисляем результат (комбинационно) и защёлкиваем
                     if (r_read) begin
                         if (is_16bit)       r_pixel_out <= r_word;
-                        else if (is_pass)   r_pixel_out <= {8'h0, (r_word & mask) >> shift};
-                        else                r_pixel_out <= {12'h0, (r_word & mask) >> shift};
+                        else if (is_pass)   r_pixel_out <= 16'({8'h0, (r_word & mask) >> shift});
+                        else                r_pixel_out <= 16'({12'h0, (r_word & mask) >> shift});
                     end else begin
                         if (!write_allowed) r_word_out <= r_word;
                         else if (is_16bit)  r_word_out <= r_pixel;
@@ -132,6 +132,7 @@ module pixel_blender (
                     // ack = 1 такт, результат валиден
                     bstate <= B_IDLE;
                 end
+                default: bstate <= B_IDLE;                
             endcase
         end
     end

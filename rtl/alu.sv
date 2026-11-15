@@ -6,8 +6,9 @@
 //   01 = arith:    op[2:1] = ADD/ADC/SUB/SBC, op[0] = sub
 //   10 = shift:    op[2:1] = ROR/SHR/SAR
 //   11 = other:    op[2:1] = MUL/RSV/TST/CMP
-//   nowrite = op[2] (для logic/arith: не писать результат, только флаги)
-//           = (fn != 00) для other (MUL пишет, TST/CMP нет)
+//
+// ALU — чистая комбинационная машина. Решение "писать / не писать"
+// принимается в top.sv по биту write инструкции.
 //
 // Flags: Z N C V. C = carry out (not borrow for SUB/SBC/CMP).
 // MUL: signed 16x16 -> 32, low 16 to res, high 16 to mhi (registered).
@@ -20,7 +21,6 @@ module alu (
     input  logic        c_in,        // для ADC/SBC
     output logic [15:0] res,
     output logic [15:0] mhi,         // старшие 16 бит последнего MUL
-    output logic        nowrite,     // 1 = только флаги (CMP/TST)
     output logic        z,
     output logic        n,
     output logic        c,
@@ -37,12 +37,8 @@ module alu (
     assign cls     = op[4:3];
     assign fn      = op[2:1];
     assign inv     = (cls == 2'b00) ? op[0] : 1'b0;
-    assign sub = (cls == 2'b01) ? op[0] : (cls == 2'b11 && fn == 2'b11) ? 1'b1 : 1'b0;
+    assign sub     = (cls == 2'b01) ? op[0] : (cls == 2'b11 && fn == 2'b11) ? 1'b1 : 1'b0;
     assign cin_sel = (cls == 2'b01) ? op[1] : 1'b0;
-
-    // nowrite: для logic/arith — op[2]; для other — (fn != 00)
-    assign nowrite = (cls == 2'b00 || cls == 2'b01) ? op[2] :
-                     (cls == 2'b11) ? (fn != 2'b00) : 1'b0;
 
     // ===== operand B =====
     logic [15:0] b_x;
@@ -52,16 +48,16 @@ module alu (
     logic        cin;
     logic [16:0] sum;
     assign cin = cin_sel ? c_in : (inv | sub);
-    assign sum = {1'b0, a} + {1'b0, b_x} + {17'd0, cin};
+    assign sum = 17'({1'b0, a} + {1'b0, b_x} + {17'd0, cin});
 
     // ===== логика =====
     logic [15:0] logic_res;
     always_comb begin
         case (fn)
-            2'b00: logic_res = b_x;       // MOV / MVN
-            2'b01: logic_res = a & b_x;   // AND / BIC
-            2'b10: logic_res = a | b_x;   // OR / ORN
-            2'b11: logic_res = a ^ b_x;   // XOR / XNOR
+            2'b00: logic_res = b_x;
+            2'b01: logic_res = a & b_x;
+            2'b10: logic_res = a | b_x;
+            2'b11: logic_res = a ^ b_x;
         endcase
     end
 
@@ -91,7 +87,6 @@ module alu (
     assign mul_lo = mul_p[15:0];
     assign mul_hi = mul_p[31:16];
 
-    // MHI регистр (защёлкивается на MUL)
     always_ff @(posedge clk) begin
         if (rst) mhi <= 16'h0;
         else if (cls == 2'b11 && fn == 2'b00) mhi <= mul_hi;

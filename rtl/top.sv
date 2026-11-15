@@ -1,36 +1,56 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// top: связка архитектурных узлов.
-// Карта операндов (6 бит, 0..63):
-//   0..31   — R0..R31 (регистры, R/W)
-//   32..39  — системные:
-//     32 ZERO (R=0, W=ignore)
-//     33 FLAGS (R/W)
-//     34 SHADOW (R/W)
-//     35 LOOP.CNT (R/W)
-//     36 LOOP.TGT (R/W)
-//     37 BUSY (R only)
-//     38 MHI (R only)
-//     39 reserved
-//   40..43  — DATA[0..3] (R/W)
-//   44..47  — reserved
-//   48..63  — каналы 4×4 (только W):
-//     48 + 4*ch + 0: IDX      (W)
-//     48 + 4*ch + 1: IDXH     (W)
-//     48 + 4*ch + 2: STEP     (W)
-//     48 + 4*ch + 3: MODE_PAGE (W, {PAGE[7:0], MODE[7:0]})
-//   FLUSH — CTRL class, reg_op=7, imm12[1:0] = channel.
-//   Спецоперанд-приёмник только в MOV (C3a).
+// top: LX-GPU core.
+//
+// Operand map (6 bits):
+//   0..31   R0..R31
+//   32      ZERO
+//   33      FLAGS
+//   34      BUSY
+//   35      SHADOW
+//   36      LOOP_CNT
+//   37      LOOP_TGT
+//   38      ROML    (R/W, no ROMA++)
+//   39      ROMH    (R/W, ROMA++ on access)
+//   40      ROMA    (W only)
+//   41      MHI
+//   42..43  reserved
+//   44..47  DATA[0..3]
+//   48..51  IDX[0..3]
+//   52..55  IDXH[0..3]
+//   56..59  STEP[0..3]
+//   60..63  PAGE[0..3]
+//
+// ROM protocol:
+//   MOV ROMA, R      -> set address
+//   MOV ROML, R      -> low 16 bits (no increment)
+//   MOV ROMH, R      -> high 16 bits, ROMA++
+//   MOV Rd, ROML     -> read low 16 (no increment)
+//   MOV Rd, ROMH     -> read high 16, ROMA++
+//
+// ack: any instruction waits for ack. Formed per-instruction:
+//   DATA read   -> pb_ack
+//   ROM read    -> rom_wait (1 cycle for BRAM port A)
+//   DATA write  -> gc_access_done
+//   everything else -> 1
 module top (
     input  logic        clk,
     input  logic        rst,
     output logic        halted,
     output logic        error,
+    output logic [11:0] error_code,
     input  logic        start,
-    input  logic        rom_we,
-    input  logic [11:0] rom_addr,
-    input  logic [31:0] rom_wdata,
+    input  logic        gpu_start,
+    input  logic        gpu_reset,
+    input  logic [23:0] gpu_addr,
+
+    `ifdef SIMULATION
+    // external ROM load ports (simulation/FPGA programmer only)
+    input  logic        rom_we_ext,
+    input  logic [11:0] rom_addr_ext,
+    input  logic [31:0] rom_wdata_ext,
+    `endif
 
     output logic        wb_cyc,
     output logic        wb_stb,
@@ -44,112 +64,163 @@ module top (
     // ===== ROM =====
     logic [11:0] pc;
     logic [31:0] insn;
-    microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32), .INIT_FILE("rtl/bootloader.hex")) rom (
-        .clk(clk), .addr(pc), .data(insn),
-        .we(rom_we), .waddr(rom_addr), .wdata(rom_wdata), .ack(ack), .rst(rst)
+    logic        ack;
+
+    // port A (data access from ISA)
+    logic        rom_a_we, rom_a_re;
+    logic [11:0] rom_a_addr;
+    logic [31:0] rom_a_wdata;
+    logic [31:0] rom_a_rdata;
+
+    // ROMA register (maintained by top)
+    logic [11:0] roma;
+
+    // external load mux (simulation)
+    logic        rom_a_we_mux;
+    logic [11:0] rom_a_addr_mux;
+    logic [31:0] rom_a_wdata_mux;
+
+    `ifdef SIMULATION
+    assign rom_a_we_mux    = rom_we_ext    | rom_a_we;
+    assign rom_a_addr_mux  = rom_we_ext    ? rom_addr_ext  : rom_a_addr;
+    assign rom_a_wdata_mux = rom_we_ext    ? rom_wdata_ext : rom_a_wdata;
+    `else
+    assign rom_a_we_mux    = rom_a_we;
+    assign rom_a_addr_mux  = rom_a_addr;
+    assign rom_a_wdata_mux = rom_a_wdata;
+    `endif
+
+    microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
+                    .INIT_FILE("rtl/bootloader.hex")) rom (
+        .clk(clk), .rst(rst),
+        .addr(pc), .data(insn), .ack(ack),
+        .we(rom_a_we_mux), .waddr(rom_a_addr_mux), .wdata(rom_a_wdata_mux),
+        .rdata_a(rom_a_rdata), .re(rom_a_re)
     );
 
     // ===== decode =====
     logic        l;
     logic [1:0]  imm_class;
-    logic [4:0]  dst;
-    logic        ds;
+    logic [5:0]  dst_code;
+    logic        write_en;
     logic [3:0]  cond;
     logic        f;
     logic [4:0]  reg_op;
+    logic        r_is_reg;
     logic [5:0]  src;
-    logic [11:0] imm12;
     logic        sx;
+    logic [10:0] imm11;
+    logic [11:0] imm12_ctrl;
+    logic [15:0] imm16;
+    logic        is_ldi, is_ctrl;
 
-    assign l         = insn[31];
-    assign imm_class = {insn[30], insn[29]};
-    assign dst       = insn[28:24];
-    assign ds        = insn[23];
-    assign cond      = insn[22:19];
-    assign f         = insn[18];
-    assign reg_op    = insn[17:13];
-    assign src       = insn[12:7];
-    assign imm12     = insn[11:0];
-    assign sx        = insn[12];
+    assign l          = insn[31];
+    assign imm_class  = {insn[30], insn[29]};
+    assign dst_code   = insn[28:23];
+    assign write_en   = insn[22];
+    assign cond       = insn[21:18];
+    assign f          = insn[17];
+    assign reg_op     = insn[16:12];
+    assign r_is_reg   = insn[16];
+    assign src        = insn[11:6];
+    assign sx         = insn[11];
+    assign imm11      = insn[10:0];
+    assign imm12_ctrl = insn[11:0];
+    assign imm16      = insn[15:0];
+    assign is_ldi     = (imm_class == 2'b01);
+    assign is_ctrl    = (imm_class == 2'b10);
+
+    logic skip_insn;
 
     // ===== flags =====
     logic z_r, n_r, c_r, v_r;
     logic z, n, c, v;
     assign z = z_r; assign n = n_r; assign c = c_r; assign v = v_r;
 
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            z_r <= 1'b0;
-            n_r <= 1'b0;
-            c_r <= 1'b0;
-            v_r <= 1'b0;
-        end else if (ack && f) begin
-            z_r <= alu_z;
-            n_r <= alu_n;
-            c_r <= alu_c;
-            v_r <= alu_v;
-        end
+    logic alu_z, alu_n, alu_c, alu_v;
+    logic [15:0] alu_mhi;
+
+    logic cond_ok;
+    always_comb begin
+        case (cond)
+            4'd0:  cond_ok = 1'b1;
+            4'd1:  cond_ok = z_r;
+            4'd2:  cond_ok = ~z_r;
+            4'd3:  cond_ok = c_r;
+            4'd4:  cond_ok = ~c_r;
+            4'd5:  cond_ok = n_r;
+            4'd6:  cond_ok = ~n_r;
+            4'd7:  cond_ok = v_r;
+            4'd8:  cond_ok = ~v_r;
+            4'd9:  cond_ok = c_r & ~z_r;
+            4'd10: cond_ok = ~c_r | z_r;
+            4'd11: cond_ok = (n_r == v_r);
+            4'd12: cond_ok = (n_r != v_r);
+            4'd13: cond_ok = ~z_r & (n_r == v_r);
+            4'd14: cond_ok = z_r | (n_r != v_r);
+            default: cond_ok = 1'b0;
+        endcase
     end
-    
-    // ===== register file =====
+
+    logic exec, run;
+    assign exec = ack && !skip_insn && !halted && !error;
+    // run: side-effect launch (no ack dependency) — breaks ack<->exec<->gc_access loop
+    assign run  = !skip_insn && !halted && !error;
+
+    // ===== regfile =====
     logic [4:0]  ra, rb, wa;
     logic [15:0] rdata_a, rdata_b, wdata;
-    logic        we;
+    logic        we_rf;
     regfile rf (
         .clk(clk), .rst(rst),
         .ra(ra), .rdata_a(rdata_a),
         .rb(rb), .rdata_b(rdata_b),
-        .we(we), .wa(wa), .wdata(wdata)
+        .we(we_rf), .wa(wa), .wdata(wdata)
     );
 
     // ===== ALU =====
     logic [4:0]  alu_op;
-    logic [15:0] alu_a, alu_b, alu_res, alu_mhi;
-    logic        alu_nowrite;
-    logic        alu_z, alu_n, alu_c, alu_v;
+    logic [15:0] alu_a, alu_b, alu_res;
     alu al (
         .clk(clk), .rst(rst),
         .op(alu_op), .a(alu_a), .b(alu_b), .c_in(c_r),
-        .res(alu_res), .mhi(alu_mhi), .nowrite(alu_nowrite),
+        .res(alu_res), .mhi(alu_mhi),
         .z(alu_z), .n(alu_n), .c(alu_c), .v(alu_v)
     );
-    // ===== ack (объявляем до инстанса sequencer) =====
-    logic ack;
 
     // ===== sequencer =====
-    logic [11:0] pc_next, error_code;
-    logic [15:0] shadow;
-    logic [15:0] loop_cnt;
+    logic [15:0] shadow, loop_cnt;
     logic [11:0] loop_tgt;
     logic        irq_pending;
-    logic [11:0] irq_code;
-    logic [11:0] jmpr_target;
-    logic        stall;
+    logic [11:0] irq_code, jmpr_target;
+    logic        loop_cnt_we, loop_tgt_we, shadow_we;
+    logic [15:0] loop_cnt_in, shadow_in;
+    logic [11:0] loop_tgt_in;
+
     sequencer seq (
-        .clk(clk), .rst(rst), .start(start),
+        .clk(clk), .rst(rst),
+        .start(start | gpu_start),
+        .reset_halt(gpu_reset),
         .imm_class(imm_class), .reg_op(reg_op), .cond(cond),
-        .l(l), .imm12(imm12),
+        .l(l), .imm12(imm12_ctrl), .r_is_reg(r_is_reg),
         .z(z_r), .n(n_r), .c(c_r), .v(v_r),
         .jmpr_target(jmpr_target),
-        .pc(pc), .pc_next(pc_next), .shadow(shadow),
+        .pc(pc), .shadow(shadow),
         .loop_cnt(loop_cnt), .loop_tgt(loop_tgt),
         .halted(halted), .error(error), .error_code(error_code),
         .irq_pending(irq_pending), .irq_code(irq_code),
+        .skip_insn(skip_insn),
         .ack(ack),
-        .loop_cnt_we(1'b0), .loop_cnt_in(16'h0),
-        .loop_tgt_we(1'b0), .loop_tgt_in(12'h0)
+        .loop_cnt_we(loop_cnt_we), .loop_cnt_in(loop_cnt_in),
+        .loop_tgt_we(loop_tgt_we), .loop_tgt_in(loop_tgt_in),
+        .shadow_we(shadow_we), .shadow_in(shadow_in)
     );
 
     // ===== pixel_engine =====
     logic [1:0]  pe_ch;
-    logic        pe_mode_we;
-    logic [2:0]  pe_mode_in;
-    logic        pe_idxh_we;
-    logic [2:0]  pe_idxh_in;
-    logic        pe_idx_we;
-    logic [15:0] pe_idx_in;
-    logic        pe_step_we;
-    logic [15:0] pe_step_in;
+    logic        pe_mode_we, pe_idxh_we, pe_idx_we, pe_step_we;
+    logic [2:0]  pe_mode_in, pe_idxh_in;
+    logic [15:0] pe_idx_in, pe_step_in;
     logic        pe_access;
     logic [14:0] pe_word_out;
     logic [3:0]  pe_pos;
@@ -161,26 +232,21 @@ module top (
         .ch(pe_ch),
         .mode_we(pe_mode_we), .mode_in(pe_mode_in),
         .idxh_we(pe_idxh_we), .idxh_in(pe_idxh_in),
-        .idx_we(pe_idx_we), .idx_in(pe_idx_in),
+        .idx_we(pe_idx_we),   .idx_in(pe_idx_in),
         .step_we(pe_step_we), .step_in(pe_step_in),
         .access(pe_access),
-        .access_done(pb_ack),          // idx инкрементируется по ack блендера
+        .access_done(pb_ack),
         .word_out(pe_word_out),
         .pos(pe_pos), .mode(pe_mode),
         .prefetch_req(pe_prefetch_req)
     );
 
-
-
     // ===== gpu_cache =====
     logic        gc_page_we;
-    logic [7:0]  gc_page_in;
-    logic [7:0]  gc_page_out;
-    logic        gc_flush_en;
+    logic [7:0]  gc_page_in, gc_page_out;
+    logic        gc_flush_en, gc_flush_done;
     logic [1:0]  gc_flush_ch;
-    logic        gc_flush_done;
-    logic        gc_access;
-    logic        gc_we;
+    logic        gc_access, gc_we;
     logic [15:0] gc_wdata;
     logic        gc_hit;
     logic [15:0] gc_rdata;
@@ -190,6 +256,7 @@ module top (
     logic [15:0] gc_wb_dat_o;
     logic [23:0] gc_addr24;
     logic        gc_error;
+
     gpu_cache gc (
         .clk(clk), .rst(rst),
         .ch(pe_ch),
@@ -207,14 +274,13 @@ module top (
     );
 
     // ===== pixel_blender =====
-    logic        pb_start;
-    logic        pb_read;
+    logic        pb_start, pb_read;
     logic [2:0]  pb_mode;
     logic [3:0]  pb_pos;
     logic [15:0] pb_word_in, pb_pixel_in;
     logic [15:0] pb_pixel_out, pb_word_out;
-    logic        pb_ack;
-    logic        pb_busy;
+    logic        pb_ack, pb_busy;
+
     pixel_blender pb (
         .clk(clk), .rst(rst),
         .start(pb_start),
@@ -224,150 +290,192 @@ module top (
         .ack(pb_ack), .busy(pb_busy)
     );
 
-    assign pb_mode     = pe_mode;
-    assign pb_pos      = pe_pos;          // текущая позиция (не next)
-    assign pb_word_in  = gc_rdata;        // данные из кэша
-    assign pb_pixel_in = alu_res;
+    assign pb_mode    = pe_mode;
+    assign pb_pos     = pe_pos;
+    assign pb_word_in = gc_rdata;
+    assign pb_start   = gc_access_done;
 
-    // start от кэша: данные валидны
-    assign pb_start    = gc_access_done;
+    logic [15:0] pb_pixel_in_r;
+    always_ff @(posedge clk) begin
+        if (rst) pb_pixel_in_r <= 16'h0;
+        else if (gc_access && gc_we) pb_pixel_in_r <= alu_res;
+    end
+    assign pb_pixel_in = pb_pixel_in_r;
 
-    // ===== Wishbone =====
+    // ===== WB =====
     assign wb_cyc   = gc_wb_cyc;
     assign wb_stb   = gc_wb_stb;
     assign wb_we    = gc_wb_we;
     assign wb_adr   = gc_wb_adr;
     assign wb_dat_o = gc_wb_dat_o;
 
-    // ===== operand codes =====
-    logic [5:0]  dst_code, src_code;
-    assign dst_code = {ds, dst};
-    assign src_code = src;
+    // ===== helpers =====
+    logic is_mov, is_flush;
+    assign is_mov   = (reg_op == 5'b00000) && !is_ctrl && !is_ldi;
+    assign is_flush = is_ctrl && (reg_op == 5'd6);
 
-    logic is_ctrl;
-    assign is_ctrl = (imm_class == 2'b10);
-
-    // ===== operand A (always from register file) =====
-    assign ra = dst[4:0];
+    assign ra    = dst_code[4:0];
     assign alu_a = rdata_a;
 
     // ===== special read =====
     logic [15:0] sp_rd;
-
     always_comb begin
         sp_rd = 16'h0;
-
-        if (src_code >= 6'd32 && src_code < 6'd40) begin
-            // системные 32..39
-            case (src_code)
-                6'd32: sp_rd = 16'h0;                              // ZERO
-                6'd33: sp_rd = {12'h0, v_r, c_r, n_r, z_r};        // FLAGS
-                6'd34: sp_rd = shadow;                             // SHADOW
-                6'd35: sp_rd = loop_cnt;                           // LOOP.CNT
-                6'd36: sp_rd = {4'h0, loop_tgt};                   // LOOP.TGT
-                6'd37: sp_rd = {12'h0, gc_wb_cyc, gc_flush_done, gc_access_done, gc_hit};  // BUSY
-                6'd38: sp_rd = alu_mhi;                            // MHI
-                6'd39: sp_rd = 16'h0;                              // reserved
-                default: sp_rd = 16'h0;
-            endcase
-        end else if (src_code >= 6'd40 && src_code < 6'd44) begin
-            // DATA[0..3] — read pixel
-            sp_rd = pb_pixel_out;
-        end else begin
-            // 48..63 — каналы (только W). Чтение = 0.
-            sp_rd = 16'h0;
-        end
+        case (src)
+            6'd32: sp_rd = 16'h0;
+            6'd33: sp_rd = {12'h0, v_r, c_r, n_r, z_r};
+            6'd34: sp_rd = {12'h0, gc_wb_cyc, gc_flush_done,
+                            gc_access_done, gc_hit};
+            6'd35: sp_rd = shadow;
+            6'd36: sp_rd = loop_cnt;
+            6'd37: sp_rd = {4'h0, loop_tgt};
+            6'd38: sp_rd = rom_a_rdata[15:0];
+            6'd39: sp_rd = rom_a_rdata[31:16];
+            6'd40: sp_rd = 16'h0;
+            6'd41: sp_rd = alu_mhi;
+            6'd44, 6'd45, 6'd46, 6'd47: sp_rd = pb_pixel_out;
+            default: sp_rd = 16'h0;
+        endcase
     end
 
     // ===== operand B =====
-    assign rb = (imm_class == 2'b00 && src_code < 6'd32) ? src_code[4:0] : 5'd0;
-    assign alu_b = (imm_class == 2'b11) ?
-                   (sx && imm12[11] ? {4'hF, imm12} : {4'h0, imm12}) :
-                   (src_code < 6'd32 ? rdata_b : sp_rd);
+    assign rb    = (imm_class == 2'b00 || (is_ctrl && r_is_reg && src < 6'd32))
+                   ? src[4:0] : 5'd0;
+    assign alu_b = (imm_class == 2'b11)
+                   ? (sx && imm11[10] ? {5'h1F, imm11} : {5'h00, imm11})
+                   : (src < 6'd32 ? rdata_b : sp_rd);
 
-    // ===== ALU op =====
-    assign alu_op = reg_op;
+    assign alu_op      = reg_op;
+    assign jmpr_target = src < 6'd32 ? rdata_b[11:0] : sp_rd[11:0];
 
-    // ===== writeback (R0..R31) =====
-    // Протокол: ack — однотактовый строп от каждого устройства.
-    // top.sv собирает AND всех ack. we — импульс по ack.
-    logic is_data_read;
-    assign is_data_read = !is_ctrl && (src_code >= 6'd40 && src_code < 6'd44);
+    // ===== read/write classification =====
+    logic is_data_read, is_rom_read, is_data_write;
+    assign is_data_read  = !is_ctrl && (src >= 6'd44 && src < 6'd48);
+    assign is_rom_read   = !is_ctrl && (src == 6'd38 || src == 6'd39);
+    assign is_data_write = is_mov && (dst_code >= 6'd44 && dst_code < 6'd48);
 
-    // ack: для DATA-операций — от блендера (pb_ack), иначе — сразу.
-    assign ack = is_data_read ? pb_ack : 1'b1;
+    // ===== ROM access control =====
+    logic [31:0] rom_wdata_r;
+    logic        rom_we_r, rom_wait_r;
 
-    // we — импульс по ack, только для MOV в R0..R31
-    assign we    = ack && !is_ctrl && !is_flush && !alu_nowrite && (dst_code < 6'd32);
-    assign wa    = dst[4:0];
-    assign wdata = is_data_read ? pb_pixel_out : alu_res;   // для DATA — из блендера
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            roma        <= 12'h0;
+            rom_wdata_r <= 32'h0;
+            rom_we_r    <= 1'b0;
+        end else begin
+            rom_we_r <= 1'b0;
+            if (exec && cond_ok && is_mov && (dst_code == 6'd40))
+                roma <= alu_res[11:0];
+            if (exec && cond_ok && is_mov && (dst_code == 6'd38))
+                rom_wdata_r[15:0] <= alu_res;
+            if (exec && cond_ok && is_mov && (dst_code == 6'd39)) begin
+                rom_wdata_r[31:16] <= alu_res;
+                rom_we_r           <= 1'b1;
+                roma               <= roma + 12'd1;
+            end
+            if (exec && cond_ok && is_rom_read && (src == 6'd39))
+                roma <= roma + 12'd1;
+        end
+    end
 
+    assign rom_a_we    = rom_we_r;
+    assign rom_a_addr  = roma;
+    assign rom_a_wdata = rom_wdata_r;
+    assign rom_a_re    = is_rom_read && exec;
 
-    // ===== special write (dst_code >= 32, only MOV) =====
-    logic is_mov;
-    assign is_mov = (reg_op[4:3] == 2'b00 && reg_op[2:1] == 2'b00 && reg_op[0] == 1'b0);
+    always_ff @(posedge clk) begin
+        if (rst) rom_wait_r <= 1'b0;
+        else     rom_wait_r <= is_rom_read && exec;
+    end
 
-    logic is_flush;
-    assign is_flush = is_ctrl && (reg_op == 5'd7);
+    // ===== ack =====
+    assign ack = is_data_read  ? pb_ack
+               : is_rom_read   ? rom_wait_r
+               : is_data_write ? gc_access_done
+               : 1'b1;
 
+    // ===== writeback =====
+    assign we_rf = exec && cond_ok && write_en && (dst_code < 6'd32);
+    assign wa    = dst_code[4:0];
+    assign wdata = is_ldi        ? imm16
+                 : is_data_read  ? pb_pixel_out
+                 : is_rom_read   ? sp_rd
+                 : alu_res;
+
+    // ===== sysreg writes =====
+    logic sys_we;
+    assign sys_we = exec && cond_ok && write_en && !is_ctrl
+                    && ((dst_code >= 6'd33 && dst_code <= 6'd37)
+                     || (dst_code >= 6'd44));
+
+    assign shadow_we   = sys_we && (dst_code == 6'd35);
+    assign shadow_in   = alu_res;
+    assign loop_cnt_we = sys_we && (dst_code == 6'd36);
+    assign loop_cnt_in = alu_res;
+    assign loop_tgt_we = sys_we && (dst_code == 6'd37);
+    assign loop_tgt_in = alu_res[11:0];
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            z_r <= 1'b0; n_r <= 1'b0; c_r <= 1'b0; v_r <= 1'b0;
+        end else if (exec && cond_ok && write_en && !is_ctrl &&
+                     dst_code == 6'd33) begin
+            {v_r, c_r, n_r, z_r} <= alu_res[3:0];
+        end else if (exec && f && !is_ctrl && !is_ldi) begin
+            z_r <= alu_z; n_r <= alu_n; c_r <= alu_c; v_r <= alu_v;
+        end
+    end
+
+    // ===== special writes =====
     always_comb begin
-        pe_ch = 2'd0;
+        pe_ch      = 2'd0;
         pe_mode_we = 1'b0; pe_mode_in = 3'h0;
         pe_idxh_we = 1'b0; pe_idxh_in = 3'h0;
         pe_idx_we  = 1'b0; pe_idx_in  = 16'h0;
         pe_step_we = 1'b0; pe_step_in = 16'h0;
         pe_access  = 1'b0;
         gc_page_we = 1'b0; gc_page_in = 8'h0;
-        gc_flush_en = 1'b0; gc_flush_ch = 2'd0;
-        gc_access = 1'b0; gc_we = 1'b0; gc_wdata = 16'h0;
-        pb_read = 1'b0;
+        gc_flush_en= 1'b0; gc_flush_ch = 2'd0;
+        gc_access  = 1'b0; gc_we = 1'b0; gc_wdata = 16'h0;
+        pb_read    = 1'b0;
 
-        // --- special write (only MOV, dst_code >= 32) ---
-        if (is_mov && dst_code >= 6'd32) begin
-            if (dst_code < 6'd40) begin
-                // системные 32..39: только FLAGS, SHADOW, LOOP.CNT, LOOP.TGT (R/W)
-                // ZERO/BUSY/MHI — игнор
-            end else if (dst_code < 6'd44) begin
-                // DATA[0..3] (40..43): write
-                pe_ch = dst_code[1:0];
-                gc_access = 1'b1;
-                gc_we = 1'b1;
-                gc_wdata = alu_res;
-            end else if (dst_code >= 6'd48) begin
-                // каналы (48..63): 4 вида
-                pe_ch = dst_code[3:2];
-                case (dst_code[1:0])
-                    2'd0: begin pe_idx_we  = 1'b1; pe_idx_in  = alu_res[15:0]; end
-                    2'd1: begin pe_idxh_we = 1'b1; pe_idxh_in = alu_res[2:0];  end
-                    2'd2: begin pe_step_we = 1'b1; pe_step_in = alu_res[15:0]; end
-                    2'd3: begin
-                        pe_mode_we = 1'b1; pe_mode_in = alu_res[2:0];
-                        gc_page_we = 1'b1; gc_page_in = alu_res[15:8];
-                    end
-                endcase
+        // GPU_START: configure CH0 from gpu_addr
+        if (gpu_start) begin
+            pe_ch      = 2'd0;
+            pe_mode_we = 1'b1; pe_mode_in = 3'd4;
+            pe_step_we = 1'b1; pe_step_in = 16'h0010;
+            pe_idx_we  = 1'b1; pe_idx_in  = {1'b0, gpu_addr[15:1]};
+            pe_idxh_we = 1'b1; pe_idxh_in = 3'h0;
+            gc_page_we = 1'b1; gc_page_in = gpu_addr[23:16];
+        end else if (run && cond_ok && is_mov && dst_code >= 6'd44) begin
+            pe_ch = dst_code[1:0];
+            if (dst_code < 6'd48) begin
+                gc_access = 1'b1; gc_we = 1'b1; gc_wdata = alu_res;
+            end else if (dst_code < 6'd52) begin
+                pe_idx_we = 1'b1; pe_idx_in = alu_res;
+            end else if (dst_code < 6'd56) begin
+                pe_idxh_we = 1'b1; pe_idxh_in = alu_res[2:0];
+            end else if (dst_code < 6'd60) begin
+                pe_step_we = 1'b1; pe_step_in = alu_res;
+            end else begin
+                pe_mode_we = 1'b1; pe_mode_in = alu_res[10:8];
+                gc_page_we = 1'b1; gc_page_in = alu_res[7:0];
             end
         end
 
-        // --- DATA read (src_code 40..43) ---
-        if (!is_ctrl && src_code >= 6'd40 && src_code < 6'd44) begin
-            pe_ch = src_code[1:0];
+        if (run && cond_ok && is_data_read) begin
+            pe_ch     = src[1:0];
             gc_access = 1'b1;
-            gc_we = 1'b0;
+            gc_we     = 1'b0;
             pe_access = 1'b1;
-            pb_read = 1'b1;
+            pb_read   = 1'b1;
         end
 
-        // --- FLUSH: CTRL, reg_op=7, imm12[1:0] = channel ---
-        if (is_flush) begin
+        if (run && cond_ok && is_flush) begin
             gc_flush_en = 1'b1;
-            gc_flush_ch = imm12[1:0];
+            gc_flush_ch = imm12_ctrl[1:0];
         end
     end
-
-    // ===== ack для sequencer'а =====
-    // stalled больше нет: pc шагает по ack, а не по !stall.
-
-    // ===== JMPR target =====
-    assign jmpr_target = alu_res[11:0];
 
 endmodule

@@ -278,6 +278,10 @@ module gpu_cache (
                         cstate <= C_IDLE;
                     end
                 end
+
+                default: begin
+                   cstate <= C_IDLE;
+                end
             endcase
         end
     end

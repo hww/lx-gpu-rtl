@@ -13,7 +13,7 @@ static Vtb_top_wrapper* dut;
 static VerilatedVcdC* tfp_p = nullptr;
 static uint64_t cycles = 0;
 
-#define MEM_WORDS 32768
+#define MEM_WORDS 65536
 static uint16_t mem[MEM_WORDS];
 
 // ---------------------------------------------------------------------------
@@ -278,12 +278,16 @@ int main(int argc, char** argv) {
     uint64_t limit = 100000000ULL;
     while (!dut->halted && !dut->error && cycles < limit) {
         if (cycles >= 0 && cycles < 1000) {
-  printf("cyc=%4llu pc=%03X insn=%08X r2=%04X z=%d\n",
+ printf("FLUSH: cyc=%llu pc=%03X flush_en=%d flush_ch=%d flush_done=%d cst=%d wb_cyc=%d wb_we=%d wb_adr=%06X\n",
         (unsigned long long)cycles,
         (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__pc,
-        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rom__DOT__data_r,
-        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem_a[2],
-        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__z_r);
+        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_flush_en,
+        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_flush_ch,
+        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc__DOT__flush_done_r,
+        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc__DOT__cstate,
+        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_wb_cyc,
+        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_wb_we,
+        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_wb_adr);
         }
         step();
     }
@@ -298,10 +302,14 @@ int main(int argc, char** argv) {
         return 1;
     }
     printf("HALTED: cycles=%llu\n", (unsigned long long)cycles);
+    printf("mem[0x000]=%04X mem[0x001]=%04X mem[0x8000]=%04X mem[0x8001]=%04X\n",
+       mem[0x000], mem[0x001], mem[0x8000], mem[0x8001]);
+    printf("mem[0x000]=%04X mem[0x100]=%04X mem[0x8000]=%04X mem[0x8010]=%04X\n",
+        mem[0x000], mem[0x100], mem[0x8000], mem[0x8010]);
 
     printf("registers R0..R31:\n");
     for (int i = 0; i < 32; i++) {
-        printf("  R%02d = %04X\n", i, (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem_a[i]);
+        printf("  R%02d = %04X\n", i, (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem[i]);
     }
 
     printf("mem[0x000]=%04X mem[0x100]=%04X mem[0x180]=%04X mem[0x200]=%04X\n",

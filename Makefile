@@ -13,7 +13,14 @@ RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_blender.sv rtl/pixel_engine.sv \
 
 TOP := top_fpga
 
-.PHONY: all synth pnr bit clean stat-hier yosys \
+# ---- Assembler ----
+ASM       := python3 tools/asm.py
+ASM_FLAGS := --raw --pad 4096
+
+ASM_SRCS := $(wildcard rtl/*.asm) $(wildcard sim/*.asm)
+ASM_HEXS := $(ASM_SRCS:.asm=.hex)
+
+.PHONY: all synth pnr bit clean stat-hier yosys asm \
         sim-top sim-sequencer sim-alu sim-pixel-engine sim-pixel-blender \
         sim-gpu-cache sim-image-roundtrip
 
@@ -22,8 +29,14 @@ all: bit
 $(BUILD):
 	mkdir -p $(BUILD)
 
+# ---- Assembly: all .asm -> .hex (padded to ROM size) ----
+asm: $(ASM_HEXS)
+
+%.hex: %.asm tools/asm.py
+	$(ASM) $(ASM_FLAGS) $< > $@
+
 # ---- simulation (Verilator) ----
-sim-top:
+sim-top: asm
 	mkdir -p $(BUILD)/sim_top
 	verilator --cc --exe --build -j 1 \
 	    -DSIMULATION \
@@ -37,7 +50,7 @@ sim-top:
 	    sim/tb_top_wrapper.sv $(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
 	./$(BUILD)/sim_top/Vtb_top_wrapper
 
-sim-sequencer:
+sim-sequencer: asm
 	mkdir -p $(BUILD)/sim_sequencer
 	verilator --cc --exe --build -j 1 \
 	    -DSIMULATION \
@@ -99,7 +112,7 @@ sim-image-roundtrip:
 	./$(BUILD)/sim_image_roundtrip/image_roundtrip
 
 # ---- synthesis for PnR ----
-synth: | $(BUILD)
+synth: asm | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/synth.log -p \
 	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -abc9 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
 	@echo "=== flat stat ==="
@@ -113,7 +126,7 @@ bit: pnr
 	$(ECPPACK) --input $(BUILD)/$(TOP).config --bit $(BUILD)/$(TOP).bit --svf $(BUILD)/$(TOP).svf
 
 # ---- hierarchical stat (per-module) ----
-stat-hier: | $(BUILD)
+stat-hier: asm | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p \
 	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
 	@echo "Full report: $(BUILD)/stat_hier.txt"
@@ -124,21 +137,8 @@ stat-hier: | $(BUILD)
 	          for(k in seen) printf "%-45s %7d %7d %5d %5d\n",k,l[k],f[k],d[k],x[k]}' $(BUILD)/stat_hier.txt
 
 # ---- quick flat stat (no JSON) ----
-yosys: | $(BUILD)
+yosys: asm | $(BUILD)
 	$(YOSYS) -p "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -json $(BUILD)/$(TOP).json -no-rw-check; stat"
 
 clean:
 	rm -rf $(BUILD)
-
-
-# ---- Assembly ----
-ASM := python3 tools/asm.py
-
-sim/sprite_16x16.png:
-	python3 tools/gen_sprite.py
-
-sim/test_sprite.hex: sim/test_sprite.asm tools/asm.py
-	$(ASM) sim/test_sprite.asm > sim/test_sprite.hex
-
-sprite: sim/sprite_16x16.png sim/test_sprite.hex
-	@echo "sprite ready"
