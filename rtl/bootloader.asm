@@ -1,7 +1,11 @@
-        LDI     R4, #0x0020
-        MOV     ROMA, R4
-        LDI     R4, #0x4000
-        MOV     ROML, R4
-        MOV     ROMH, R4
-        LDI     R5, #0x0020
-        JMP     R5
+        MOV     R0, DATA0
+        MOV     R1, DATA0
+        MOV     ROMA, R1
+copy_loop:
+        MOV     R2, DATA0
+        MOV     ROML, R2
+        MOV     R3, DATA0
+        MOV     ROMH, R3
+        SUB     R0, #2
+        JMP.NE  copy_loop
+        JMP     R1

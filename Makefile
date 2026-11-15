@@ -20,7 +20,7 @@ ASM_FLAGS := --raw --pad 4096
 ASM_SRCS := $(wildcard rtl/*.asm) $(wildcard sim/*.asm)
 ASM_HEXS := $(ASM_SRCS:.asm=.hex)
 
-.PHONY: all synth pnr bit clean stat-hier yosys asm \
+.PHONY: all synth pnr bit clean stat-hier yosys asm pack  \
         sim-top sim-sequencer sim-alu sim-pixel-engine sim-pixel-blender \
         sim-gpu-cache sim-image-roundtrip
 
@@ -36,7 +36,7 @@ asm: $(ASM_HEXS)
 	$(ASM) $(ASM_FLAGS) $< > $@
 
 # ---- simulation (Verilator) ----
-sim-top: asm
+sim-top: asm pack
 	mkdir -p $(BUILD)/sim_top
 	verilator --cc --exe --build -j 1 \
 	    -DSIMULATION \
@@ -48,9 +48,9 @@ sim-top: asm
 	    rtl/alu.sv rtl/regfile.sv rtl/sequencer.sv rtl/microcode_rom.sv \
 	    rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/top.sv \
 	    sim/tb_top_wrapper.sv $(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
-	./$(BUILD)/sim_top/Vtb_top_wrapper
+	./$(BUILD)/sim_top/Vtb_top_wrapper -s1 sim/test_sprite.pkg -gpuaddr 0
 
-sim-sequencer: asm
+sim-sequencer: asm pack
 	mkdir -p $(BUILD)/sim_sequencer
 	verilator --cc --exe --build -j 1 \
 	    -DSIMULATION \
@@ -112,7 +112,7 @@ sim-image-roundtrip:
 	./$(BUILD)/sim_image_roundtrip/image_roundtrip
 
 # ---- synthesis for PnR ----
-synth: asm | $(BUILD)
+synth: asm pack | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/synth.log -p \
 	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -abc9 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
 	@echo "=== flat stat ==="
@@ -126,7 +126,7 @@ bit: pnr
 	$(ECPPACK) --input $(BUILD)/$(TOP).config --bit $(BUILD)/$(TOP).bit --svf $(BUILD)/$(TOP).svf
 
 # ---- hierarchical stat (per-module) ----
-stat-hier: asm | $(BUILD)
+stat-hier: asm pack | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p \
 	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
 	@echo "Full report: $(BUILD)/stat_hier.txt"
@@ -137,8 +137,17 @@ stat-hier: asm | $(BUILD)
 	          for(k in seen) printf "%-45s %7d %7d %5d %5d\n",k,l[k],f[k],d[k],x[k]}' $(BUILD)/stat_hier.txt
 
 # ---- quick flat stat (no JSON) ----
-yosys: asm | $(BUILD)
+yosys: asm pack | $(BUILD)
 	$(YOSYS) -p "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -json $(BUILD)/$(TOP).json -no-rw-check; stat"
 
 clean:
 	rm -rf $(BUILD)
+
+
+# ---- Pack: .asm -> .pkg (WB package for RAM) ----
+ASM_PKGS := $(patsubst %.asm,%.pkg,$(ASM_SRCS))
+
+pack: $(ASM_PKGS)
+
+%.pkg: %.asm tools/asm.py
+	$(ASM) --pack --start 0x0020 $< > $@

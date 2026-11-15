@@ -46,7 +46,9 @@ module pixel_engine (
 
     logic [2:0]  k;
     logic [3:0]  shift_left;
-    assign k          = k_of_fmt(mode_r[ch]);
+    logic [2:0] mode_eff;
+    assign mode_eff = mode_we ? mode_in : mode_r[ch];
+    assign k        = k_of_fmt(mode_eff);
     assign shift_left = 4 - k;
 
     assign idx_stored  = idx_step_mem[{ch, 1'b0}];
@@ -67,7 +69,7 @@ module pixel_engine (
     // Запись STEP: 12.4 (16 бит знаковый) -> 15.4 (19 бит), расширение знаком.
     logic [18:0] step_write_val;
     assign step_write_val = {{3{step_in[15]}}, step_in} >> k;
-
+    
     // EBR: запись при IDX/STEP или автоинкремент
     logic [18:0] idx_next;
     assign idx_next = idx_stored + step_stored;

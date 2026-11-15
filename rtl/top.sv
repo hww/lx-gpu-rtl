@@ -45,13 +45,6 @@ module top (
     input  logic        gpu_reset,
     input  logic [23:0] gpu_addr,
 
-    `ifdef SIMULATION
-    // external ROM load ports (simulation/FPGA programmer only)
-    input  logic        rom_we_ext,
-    input  logic [11:0] rom_addr_ext,
-    input  logic [31:0] rom_wdata_ext,
-    `endif
-
     output logic        wb_cyc,
     output logic        wb_stb,
     output logic        wb_we,
@@ -80,21 +73,15 @@ module top (
     logic [11:0] rom_a_addr_mux;
     logic [31:0] rom_a_wdata_mux;
 
-    `ifdef SIMULATION
-    assign rom_a_we_mux    = rom_we_ext    | rom_a_we;
-    assign rom_a_addr_mux  = rom_we_ext    ? rom_addr_ext  : rom_a_addr;
-    assign rom_a_wdata_mux = rom_we_ext    ? rom_wdata_ext : rom_a_wdata;
-    `else
     assign rom_a_we_mux    = rom_a_we;
     assign rom_a_addr_mux  = rom_a_addr;
     assign rom_a_wdata_mux = rom_a_wdata;
-    `endif
 
     microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
                     .INIT_FILE("rtl/bootloader.hex")) rom (
         .clk(clk), .rst(rst),
         .addr(pc), .data(insn), .ack(ack),
-        .we(rom_a_we_mux), .waddr(rom_a_addr_mux), .wdata(rom_a_wdata_mux),
+        .we(rom_a_we), .waddr(rom_a_addr), .wdata(rom_a_wdata),
         .rdata_a(rom_a_rdata), .re(rom_a_re)
     );
 
@@ -355,34 +342,36 @@ module top (
     assign is_data_write = is_mov && (dst_code >= 6'd44 && dst_code < 6'd48);
 
     // ===== ROM access control =====
-    logic [31:0] rom_wdata_r;
-    logic        rom_we_r, rom_wait_r;
+    logic [15:0] rom_lo_r;
+    logic [31:0] rom_wdata_c;
+    logic        rom_wait_r;
+
+    always_comb begin
+        rom_wdata_c = {16'h0, rom_lo_r};
+        if (exec && cond_ok && is_mov && (dst_code == 6'd39))
+            rom_wdata_c[31:16] = alu_res;
+    end
+
+    assign rom_a_we    = exec && cond_ok && is_mov && (dst_code == 6'd39);
+    assign rom_a_addr  = roma;
+    assign rom_a_wdata = rom_wdata_c;
+    assign rom_a_re    = is_rom_read && exec;
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            roma        <= 12'h0;
-            rom_wdata_r <= 32'h0;
-            rom_we_r    <= 1'b0;
+            roma    <= 12'h0;
+            rom_lo_r<= 16'h0;
         end else begin
-            rom_we_r <= 1'b0;
             if (exec && cond_ok && is_mov && (dst_code == 6'd40))
                 roma <= alu_res[11:0];
             if (exec && cond_ok && is_mov && (dst_code == 6'd38))
-                rom_wdata_r[15:0] <= alu_res;
-            if (exec && cond_ok && is_mov && (dst_code == 6'd39)) begin
-                rom_wdata_r[31:16] <= alu_res;
-                rom_we_r           <= 1'b1;
-                roma               <= roma + 12'd1;
-            end
+                rom_lo_r <= alu_res;
+            if (exec && cond_ok && is_mov && (dst_code == 6'd39))
+                roma <= roma + 12'd1;
             if (exec && cond_ok && is_rom_read && (src == 6'd39))
                 roma <= roma + 12'd1;
         end
     end
-
-    assign rom_a_we    = rom_we_r;
-    assign rom_a_addr  = roma;
-    assign rom_a_wdata = rom_wdata_r;
-    assign rom_a_re    = is_rom_read && exec;
 
     always_ff @(posedge clk) begin
         if (rst) rom_wait_r <= 1'b0;

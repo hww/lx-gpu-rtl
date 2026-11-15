@@ -7,6 +7,8 @@ module tb_top_wrapper (
     output logic        halted,
     output logic        error,
     input  logic        start,
+    input  logic        gpu_start,
+    input  logic [23:0] gpu_addr,
     input  logic        rom_we,
     input  logic [11:0] rom_addr,
     input  logic [31:0] rom_wdata,
@@ -19,19 +21,16 @@ module tb_top_wrapper (
     input  logic        wb_ack
 );
     logic [11:0] error_code;
-    logic        gpu_start, gpu_reset;
-    logic [23:0] gpu_addr;
+    logic        gpu_reset;
     logic        rom_we_ext;
     logic [11:0] rom_addr_ext;
     logic [31:0] rom_wdata_ext;
 
-    assign gpu_start = 1'b0;
-    assign gpu_reset = 1'b0;
-    assign gpu_addr  = 24'h0;
-    assign rom_we_ext    = 1'b0;
-    assign rom_addr_ext  = 12'h0;
-    assign rom_wdata_ext = 32'h0;
-    
+    assign rom_we_ext    = rom_we;
+    assign rom_addr_ext  = rom_addr;
+    assign rom_wdata_ext = rom_wdata;
+    assign gpu_reset     = 1'b0;
+
     top u_top (
         .clk(clk),
         .rst(rst),
@@ -42,11 +41,6 @@ module tb_top_wrapper (
         .gpu_start(gpu_start),
         .gpu_reset(gpu_reset),
         .gpu_addr(gpu_addr),
-        `ifdef SIMULATION
-        .rom_we_ext(rom_we_ext),
-        .rom_addr_ext(rom_addr_ext),
-        .rom_wdata_ext(rom_wdata_ext),
-        `endif
         .wb_cyc(wb_cyc), .wb_stb(wb_stb), .wb_we(wb_we),
         .wb_adr(wb_adr), .wb_dat_o(wb_dat_o),
         .wb_dat_i(wb_dat_i), .wb_ack(wb_ack)

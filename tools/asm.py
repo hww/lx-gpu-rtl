@@ -276,26 +276,27 @@ def assemble(lines):
     return out, warnings
 
 def main():
+    pack_mode = False
+    pack_start = 0x0020
+    argv = sys.argv[1:]
     raw = False
     pad = 0
-    argv = sys.argv[1:]
-
     while argv and argv[0].startswith("--"):
         if argv[0] == "--raw":
-            raw = True
-            argv = argv[1:]
+            raw = True; argv = argv[1:]
         elif argv[0] == "--pad":
-            if len(argv) < 2:
-                print("error: --pad requires N", file=sys.stderr)
-                sys.exit(1)
-            pad = int(argv[1], 0)
-            argv = argv[2:]
+            pad = int(argv[1], 0); argv = argv[2:]
+        elif argv[0] == "--pack":
+            pack_mode = True; argv = argv[1:]
+        elif argv[0] == "--start":
+            pack_start = int(argv[1], 0); argv = argv[2:]
         else:
             print(f"error: unknown option {argv[0]}", file=sys.stderr)
             sys.exit(1)
 
     if len(argv) != 1:
-        print(f"usage: {sys.argv[0]} [--raw] [--pad N] <file.asm>", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} [--raw] [--pad N] [--pack] [--start ADDR] <file.asm>",
+              file=sys.stderr)
         sys.exit(1)
 
     with open(argv[0]) as fp:
@@ -303,6 +304,16 @@ def main():
 
     for w in warnings:
         print(f"WARNING: {w}", file=sys.stderr)
+
+    if pack_mode:
+        # package: SIZE (even word count), START, DATA*[lo,hi]...
+        pkg = [len(words) * 2 & 0xFFFF, pack_start & 0xFFFF]
+        for w, _ in words:
+            pkg.append(w & 0xFFFF)
+            pkg.append((w >> 16) & 0xFFFF)
+        for v in pkg:
+            print(f"{v:04X}")
+        return
 
     if pad and len(words) > pad:
         print(f"error: {len(words)} words exceed --pad {pad}", file=sys.stderr)

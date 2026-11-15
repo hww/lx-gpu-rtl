@@ -12,38 +12,67 @@
 static Vtb_top_wrapper* dut;
 static VerilatedVcdC* tfp_p = nullptr;
 static uint64_t cycles = 0;
-
+static int g_verbose = 0;
 #define MEM_WORDS 65536
 static uint16_t mem[MEM_WORDS];
+#define ROM_SIZE 4096
 
-// ---------------------------------------------------------------------------
-// Тактирование + эмуляция WB-памяти
-// ---------------------------------------------------------------------------
+static void dump_mem_hex(const char* tag, uint32_t word_off, uint32_t nwords) {
+    printf("=== MEM DUMP %s @0x%04X (%u words) ===\n", tag, word_off, nwords);
+    for (uint32_t i = 0; i < nwords; i += 8) {
+        printf("  %04X:", word_off + i);
+        for (uint32_t j = 0; j < 8 && i + j < nwords; j++) {
+            uint32_t w = word_off + i + j;
+            printf(" %04X", (w < MEM_WORDS) ? mem[w] : 0);
+        }
+        printf("\n");
+    }
+}
+
+static void dump_rom_hex(const char* tag, uint32_t word_off, uint32_t nwords) {
+    printf("=== ROM DUMP %s @0x%03X (%u words) ===\n", tag, word_off, nwords);
+    for (uint32_t i = 0; i < nwords; i += 4) {
+        printf("  %03X:", word_off + i);
+        for (uint32_t j = 0; j < 4 && i + j < nwords; j++) {
+            uint32_t w = word_off + i + j;
+            uint32_t v = (w < ROM_SIZE)
+                ? (uint32_t)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rom__DOT__mem[w]
+                : 0;
+            printf(" %08X", v);
+        }
+        printf("\n");
+    }
+}
+
+static void tick(int clk, bool log) {
+    dut->clk = clk;
+    dut->eval();
+    if (tfp_p) tfp_p->dump(cycles);
+    ++cycles;  
+
+    if (log && g_verbose) {
+        printf("t=%llu pc=%03X halted=%d error=%d ack=%d\n",
+            (unsigned long long)cycles,
+            (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__pc,
+            (int)dut->halted, (int)dut->error,
+            (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__ack);
+    }
+}
+
 static void step() {
     dut->wb_ack = 0;
     dut->wb_dat_i = 0;
     if (dut->wb_cyc && dut->wb_stb) {
         uint32_t a = (dut->wb_adr >> 1) & (MEM_WORDS - 1);
-        printf("WB: adr=%06X a=%04X we=%d dat_o=%04X mem=%04X\n",
-               (unsigned)dut->wb_adr, a, (int)dut->wb_we,
-               (unsigned)dut->wb_dat_o, mem[a]);
         if (dut->wb_we) mem[a] = dut->wb_dat_o;
         else           dut->wb_dat_i = mem[a];
         dut->wb_ack = 1;
     }
 
-    dut->eval();
-    if (tfp_p) tfp_p->dump(cycles);
-
-    dut->clk = 1; 
-    dut->eval();
-    if (tfp_p) tfp_p->dump(cycles);
-    
-    dut->clk = 0; 
-    dut->eval();  
-    if (tfp_p) tfp_p->dump(cycles);
-
-    ++cycles;
+    tick(0, false);
+    tick(1, true);    // posedge
+    tick(1, false);   // hold high (не фронт)
+    tick(0, false);   // negedge
 }
 
 static void load_rom(uint16_t addr, uint32_t w) {
@@ -52,34 +81,50 @@ static void load_rom(uint16_t addr, uint32_t w) {
     dut->rom_we = 0;
 }
 
-static void load_file(const char* path, uint32_t byte_off) {
+// Load hex file into RAM at word offset (16-bit words, one per line).
+static void load_hex_into_mem(const char* path, uint32_t word_off) {
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); return; }
+    char line[256];
+    uint32_t a = word_off;
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0' || *p == '\n' || *p == ';' || *p == '#') continue;
+        uint32_t w = strtoul(p, nullptr, 16);
+        if (a < MEM_WORDS) mem[a] = (uint16_t)w;
+        a++;
+    }
+    fclose(f);
+    printf("loaded %s into RAM @word 0x%04X (%u words)\n", path, word_off, a - word_off);
+}
+
+static void load_file(const char* path, uint32_t word_off) {
     FILE* f = fopen(path, "rb");
     if (!f) { printf("cannot open %s\n", path); return; }
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     std::vector<uint8_t> buf(sz);
-    fread(buf.data(), 1, sz, f); fclose(f);
+    if (fread(buf.data(), 1, sz, f) != (size_t)sz) { /* ignore */ }
+    fclose(f);
     for (long i = 0; i + 1 < sz; i += 2) {
-        uint32_t w = (byte_off + i) / 2;
+        uint32_t w = word_off + i / 2;
         if (w < MEM_WORDS) mem[w] = buf[i] | (buf[i+1] << 8);
     }
-    printf("loaded %s (%ld bytes) at 0x%X\n", path, sz, byte_off);
+    printf("loaded %s (%ld bytes) at word 0x%X\n", path, sz, word_off);
 }
 
-static void save_file(const char* path, uint32_t byte_off, uint32_t size) {
+static void save_file(const char* path, uint32_t word_off, uint32_t nwords) {
     FILE* f = fopen(path, "wb");
     if (!f) { printf("cannot write %s\n", path); return; }
-    for (uint32_t i = 0; i < size; i += 2) {
-        uint32_t w = (byte_off + i) / 2;
+    for (uint32_t i = 0; i < nwords; i++) {
+        uint32_t w = word_off + i;
         uint16_t v = (w < MEM_WORDS) ? mem[w] : 0;
         fputc(v & 0xFF, f); fputc(v >> 8, f);
     }
     fclose(f);
-    printf("saved %s (%u bytes) from 0x%X\n", path, size, byte_off);
+    printf("saved %s (%u words) from word 0x%X\n", path, nwords, word_off);
 }
 
-// ---------------------------------------------------------------------------
-// Выбор палитры по формату
-// ---------------------------------------------------------------------------
 static const uint32_t* palette_for(PixelFormat fmt, int& out_n) {
     switch (fmt) {
         case PixelFormat::BPP1:  out_n = 2;   return vga16_palette;
@@ -89,11 +134,8 @@ static const uint32_t* palette_for(PixelFormat fmt, int& out_n) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Загрузка PNG в mem[]
-// ---------------------------------------------------------------------------
 static bool load_png_into_mem(const char* path, PixelFormat fmt,
-                              uint32_t byte_off,
+                              uint32_t word_off,
                               int expect_w, int expect_h,
                               size_t& out_words) {
     Image img;
@@ -120,26 +162,22 @@ static bool load_png_into_mem(const char* path, PixelFormat fmt,
     std::vector<uint8_t>  idx   = quantize(img, fmt, pal, pal_n);
     std::vector<uint16_t> words = pack_pixels(idx, img.width, img.height, fmt);
 
-    uint32_t base_word = byte_off / 2;
-    if (base_word + words.size() > MEM_WORDS) {
+    if (word_off + words.size() > MEM_WORDS) {
         fprintf(stderr, "load_png: PNG overflows memory (%zu words at 0x%X)\n",
-                words.size(), byte_off);
+                words.size(), word_off);
         return false;
     }
-    for (size_t i = 0; i < words.size(); i++) mem[base_word + i] = words[i];
+    for (size_t i = 0; i < words.size(); i++) mem[word_off + i] = words[i];
 
-    printf("loaded %s (%dx%d, %s) at byte offset 0x%X (%zu words)\n",
+    printf("loaded %s (%dx%d, %s) at word offset 0x%X (%zu words)\n",
            path, img.width, img.height, format_name(fmt),
-           byte_off, words.size());
+           word_off, words.size());
     out_words = words.size();
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Дамп mem[] в PNG
-// ---------------------------------------------------------------------------
 static bool dump_mem_to_png(const char* path, PixelFormat fmt,
-                            uint32_t byte_off, int w, int h) {
+                            uint32_t word_off, int w, int h) {
     if (w <= 0 || h <= 0) {
         fprintf(stderr, "dump_png: invalid dimensions %dx%d\n", w, h);
         return false;
@@ -155,101 +193,88 @@ static bool dump_mem_to_png(const char* path, PixelFormat fmt,
     size_t n_words = (n_bits + 15) / 16;
 
     std::vector<uint16_t> words(n_words);
-    uint32_t base_word = byte_off / 2;
     for (size_t i = 0; i < n_words; i++) {
-        words[i] = (base_word + i < MEM_WORDS) ? mem[base_word + i] : 0;
+        words[i] = (word_off + i < MEM_WORDS) ? mem[word_off + i] : 0;
     }
 
     std::vector<uint8_t> idx = unpack_pixels(words, w, h, fmt);
-
     int pal_n = 0;
     const uint32_t* pal = palette_for(fmt, pal_n);
-
     Image out = dequantize(idx, w, h, fmt, pal);
     if (!write_image(path, out)) return false;
 
-    printf("dumped %s (%dx%d, %s) from byte offset 0x%X\n",
-           path, w, h, format_name(fmt), byte_off);
+    printf("dumped %s (%dx%d, %s) from word offset 0x%X\n",
+           path, w, h, format_name(fmt), word_off);
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vtb_top_wrapper;
 
-    VerilatedVcdC tfp;      // локальный
+    VerilatedVcdC tfp;
     tfp_p = &tfp;
     Verilated::traceEverOn(true);
     dut->trace(&tfp, 99);
     tfp.open("sim/trace.vcd");
 
-    // ---- старые аргументы (raw binary) ----
-    const char* prog = nullptr;
-    const char* s1 = nullptr; uint32_t s1_off_raw = 0x1000;
-    const char* s2 = nullptr; uint32_t s2_off_raw = 0x2000;
-    const char* dst_raw = nullptr; uint32_t dst_off_raw = 0x3000, dst_size_raw = 0x1000;
-
-    // ---- новые аргументы (PNG) ----
-    const char* s1in_path = nullptr;
+    const char* rom_prog = nullptr;   // -rom: direct ROM load
+    const char* s1 = nullptr;         // -s1: raw binary into RAM
+    uint32_t s1_off = 0;              // word offset
+    const char* s1in_path = nullptr;  // -s1in: PNG into RAM
     PixelFormat s1fmt = PixelFormat::BPP8;
-    uint32_t    s1in_off = 0;
-    int         s1in_w = 0, s1in_h = 0;
+    int s1in_w = 0, s1in_h = 0;
+
+    const char* dst_raw = nullptr;
+    uint32_t dst_off = 0, dst_size = 0x1000;
 
     const char* dout_path = nullptr;
     PixelFormat dfmt = PixelFormat::BPP8;
-    uint32_t    dout_off = 0;
-    int         dout_w = 0, dout_h = 0;
+    int dout_w = 0, dout_h = 0;
+
+    uint32_t gpu_addr = 0;
+    bool use_wb = true;               // default: WB load
 
     for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "-p")     && i+1 < argc) prog = argv[++i];
-        else if (!strcmp(argv[i], "-s1")    && i+1 < argc) s1 = argv[++i];
-        else if (!strcmp(argv[i], "-s2")    && i+1 < argc) s2 = argv[++i];
-        else if (!strcmp(argv[i], "-d")     && i+1 < argc) dst_raw = argv[++i];
-        else if (!strcmp(argv[i], "-s1off") && i+1 < argc) s1_off_raw = strtoul(argv[++i], 0, 0);
-        else if (!strcmp(argv[i], "-s2off") && i+1 < argc) s2_off_raw = strtoul(argv[++i], 0, 0);
-        else if (!strcmp(argv[i], "-doff")  && i+1 < argc) dst_off_raw = strtoul(argv[++i], 0, 0);
-        else if (!strcmp(argv[i], "-dsize") && i+1 < argc) dst_size_raw = strtoul(argv[++i], 0, 0);
-
+        if      (!strcmp(argv[i], "-rom") && i+1 < argc) { rom_prog = argv[++i]; use_wb = false; }
+        else if (!strcmp(argv[i], "-s1")  && i+1 < argc) s1 = argv[++i];
+        else if (!strcmp(argv[i], "-s1off") && i+1 < argc) s1_off = strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "-s1in")  && i+1 < argc) s1in_path = argv[++i];
         else if (!strcmp(argv[i], "-s1fmt") && i+1 < argc) {
             if (!parse_format(argv[++i], s1fmt)) { fprintf(stderr, "bad -s1fmt\n"); return 1; }
         }
-        else if (!strcmp(argv[i], "-s1off") && i+1 < argc) { /* уже разобрано выше как raw */ }
-        else if (!strcmp(argv[i], "-s1woff")&& i+1 < argc) s1in_off = strtoul(argv[++i], 0, 0);
-        else if (!strcmp(argv[i], "-s1w")   && i+1 < argc) s1in_w = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-s1h")   && i+1 < argc) s1in_h = atoi(argv[++i]);
-
-        else if (!strcmp(argv[i], "-dout")  && i+1 < argc) dout_path = argv[++i];
-        else if (!strcmp(argv[i], "-dfmt")  && i+1 < argc) {
+        else if (!strcmp(argv[i], "-s1w") && i+1 < argc) s1in_w = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-s1h") && i+1 < argc) s1in_h = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-d")    && i+1 < argc) dst_raw = argv[++i];
+        else if (!strcmp(argv[i], "-doff") && i+1 < argc) dst_off = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-dsize")&& i+1 < argc) dst_size = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-dout") && i+1 < argc) dout_path = argv[++i];
+        else if (!strcmp(argv[i], "-dfmt") && i+1 < argc) {
             if (!parse_format(argv[++i], dfmt)) { fprintf(stderr, "bad -dfmt\n"); return 1; }
         }
-        else if (!strcmp(argv[i], "-doff")  && i+1 < argc) { /* уже разобрано выше как raw */ }
-        else if (!strcmp(argv[i], "-dwoff") && i+1 < argc) dout_off = strtoul(argv[++i], 0, 0);
-        else if (!strcmp(argv[i], "-dw")    && i+1 < argc) dout_w = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-dh")    && i+1 < argc) dout_h = atoi(argv[++i]);
-
+        else if (!strcmp(argv[i], "-dw") && i+1 < argc) dout_w = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dh") && i+1 < argc) dout_h = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-gpuaddr") && i+1 < argc) gpu_addr = strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else {
             fprintf(stderr, "unknown arg: %s\n", argv[i]);
             return 1;
         }
     }
 
-    if (s1in_path) s1in_off = s1_off_raw;
-    if (dout_path) dout_off = dst_off_raw;
-
     memset(mem, 0, sizeof(mem));
 
-    dut->rst = 1; dut->start = 0;
+    dut->rst = 1; dut->start = 0; dut->gpu_start = 0; dut->gpu_addr = 0;
     dut->rom_we = 0; dut->wb_ack = 0; dut->wb_dat_i = 0;
     step(); step();
     dut->rst = 0; step();
 
-    if (prog) {
-        FILE* f = fopen(prog, "r");
-        if (!f) { fprintf(stderr, "cannot open %s\n", prog); return 1; }
+    dump_rom_hex("initial (bootloader)", 0x000, 16);
+
+    if (rom_prog) {
+        // 3.1: direct ROM load (erases bootloader)
+        FILE* f = fopen(rom_prog, "r");
+        if (!f) { fprintf(stderr, "cannot open %s\n", rom_prog); return 1; }
         char line[256]; uint16_t a = 0;
         while (fgets(line, sizeof(line), f)) {
             char* p = line;
@@ -257,74 +282,51 @@ int main(int argc, char** argv) {
             if (*p == '\0' || *p == '\n' || *p == ';' || *p == '#') continue;
             uint32_t w = strtoul(p, nullptr, 16);
             load_rom(a++, w);
-            printf("  [%03X] %08X\n", (unsigned)(a-1), w);
         }
         fclose(f);
-        printf("loaded microcode %s (%u words)\n", prog, a);
+        printf("loaded ROM directly from %s (%u words)\n", rom_prog, a);
+        dump_rom_hex("after direct load", 0x000, 16);
+        dut->start = 1; step(); dut->start = 0;
+    } else {
+        // 3.2: WB load from RAM package
+        if (s1)     load_hex_into_mem(s1, s1_off); 
+        if (s1in_path) {
+            size_t n = 0;
+            if (!load_png_into_mem(s1in_path, s1fmt, s1_off, s1in_w, s1in_h, n))
+                return 1;
+        }
+        dump_mem_hex("RAM (package)", 0x0000, 0x20);
+        dut->gpu_addr  = gpu_addr;
+        dut->gpu_start = 1; step(); dut->gpu_start = 0;
     }
 
-    if (s1) load_file(s1, s1_off_raw);
-    if (s2) load_file(s2, s2_off_raw);
-
-    if (s1in_path) {
-        size_t n_words = 0;
-        if (!load_png_into_mem(s1in_path, s1fmt, s1in_off, s1in_w, s1in_h, n_words))
-            return 1;
-    }
-
-    dut->start = 1; step(); dut->start = 0;
-
-    // ---- прогон с отладкой первых 30 тактов ----
     uint64_t limit = 100000000ULL;
     while (!dut->halted && !dut->error && cycles < limit) {
-        if (cycles >= 0 && cycles < 1000) {
- printf("FLUSH: cyc=%llu pc=%03X flush_en=%d flush_ch=%d flush_done=%d cst=%d wb_cyc=%d wb_we=%d wb_adr=%06X\n",
-        (unsigned long long)cycles,
-        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__pc,
-        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_flush_en,
-        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_flush_ch,
-        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc__DOT__flush_done_r,
-        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc__DOT__cstate,
-        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_wb_cyc,
-        (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_wb_we,
-        (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__gc_wb_adr);
-        }
         step();
     }
 
+    dump_rom_hex("after run 0x00", 0x000, 16);
+    dump_rom_hex("after run 0x20", 0x020, 16);
+    dump_mem_hex("RAM after run", 0x0000, 0x40);
 
-    if (!dut->halted) {
-        printf("FAIL: not halted (cycles=%llu)\n", (unsigned long long)cycles);
-        return 1;
-    }
-    if (dut->error) {
-        printf("FAIL: error\n");
-        return 1;
-    }
+    if (!dut->halted) { printf("FAIL: not halted (cycles=%llu)\n", (unsigned long long)cycles); return 1; }
+    if (dut->error)   { printf("FAIL: error\n"); return 1; }
     printf("HALTED: cycles=%llu\n", (unsigned long long)cycles);
-    printf("mem[0x000]=%04X mem[0x001]=%04X mem[0x8000]=%04X mem[0x8001]=%04X\n",
-       mem[0x000], mem[0x001], mem[0x8000], mem[0x8001]);
-    printf("mem[0x000]=%04X mem[0x100]=%04X mem[0x8000]=%04X mem[0x8010]=%04X\n",
-        mem[0x000], mem[0x100], mem[0x8000], mem[0x8010]);
 
     printf("registers R0..R31:\n");
     for (int i = 0; i < 32; i++) {
-        printf("  R%02d = %04X\n", i, (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem[i]);
+        printf("  R%02d = %04X\n", i,
+            (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem[i]);
     }
 
-    printf("mem[0x000]=%04X mem[0x100]=%04X mem[0x180]=%04X mem[0x200]=%04X\n",
-           mem[0x000], mem[0x100], mem[0x180], mem[0x200]);
-
-    if (dst_raw) save_file(dst_raw, dst_off_raw, dst_size_raw);
-
+    if (dst_raw) save_file(dst_raw, dst_off, dst_size);
     if (dout_path) {
-        if (!dump_mem_to_png(dout_path, dfmt, dout_off, dout_w, dout_h))
+        if (!dump_mem_to_png(dout_path, dfmt, dst_off, dout_w, dout_h))
             return 1;
     }
 
     tfp_p = nullptr;
     tfp.close();
     delete dut;
-
-   return 0;
+    return 0;
 }
