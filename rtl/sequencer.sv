@@ -1,183 +1,252 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// PC is a plain register: combinational next-value on input, address on output.
-// ROM (synchronous) presents the instruction one cycle later.
-// No pc_next signal is exposed; there is nothing to route to ROM.
+// sequencer: PC, SHADOW, LOOP, halt/error/IRQ state and next-PC selection.
 //
-// Branch delay slot (was_branch):
-//   On a taken JMP/CALL/RET or L-with-CNT>1, PC is loaded with target at the
-//   end of cycle T, while ROM at T+1 still outputs the old "next" word.
-//   was_branch=1 tells top to ignore that word for one cycle.
+// PC is a plain register that drives the ROM fetch address directly. The ROM
+// is synchronous, so the instruction for PC = A arrives when PC = A + 1.
+// Consequences:
+//   * SHADOW on CALL = pc_r, which already points past the CALL.
+//   * Branch delay slot: on a taken JMP/CALL/RET or an L-iteration, pc_r is
+//     loaded with the target at the end of cycle T, but the ROM still outputs
+//     the old "next" word at T+1. skip_o = 1 tells top to ignore that word
+//     (no register, flag, port or sequencer side effects). Cost: one bubble
+//     per taken branch and per loop iteration.
 //
-// SHADOW on CALL = PC at the CALL cycle (PC already points past CALL).
+// Priority inside one instruction: taken branch > loop return > pc + 1.
+// L is evaluated even when COND is false (it belongs to the word, not to
+// the condition).
+//
+// The *_we_i strobes are NOT gated here: top must raise them only for an
+// instruction that commits (insn_valid_i, not skipped, COND true).
 module sequencer (
     input  logic        clk,
     input  logic        rst,
 
-    input  logic [1:0]  imm_class,
-    input  logic [4:0]  reg_op,
-    input  logic [3:0]  cond,
-    input  logic        l,
-    input  logic [11:0] imm12,
-    input  logic        r_is_reg,
+    // instruction fields
+    input  logic [1:0]  insn_class_i,   // {J, I}; control class = 2'b10
+    input  logic [3:0]  ctrl_op_i,
+    input  logic [3:0]  cond_i,
+    input  logic        loop_i,         // L bit
+    input  logic [11:0] addr_i,         // ADDR: target / HALT code / IRQ code
+    input  logic        use_reg_i,      // R bit: JMP/CALL target from reg_target_i
+    input  logic [11:0] reg_target_i,
 
-    input  logic        z, n, c, v,
-    input  logic [11:0] jmpr_target,
+    // current flags
+    input  logic        flag_z_i,
+    input  logic        flag_n_i,
+    input  logic        flag_c_i,
+    input  logic        flag_v_i,
 
-    output logic [11:0] pc,
-    output logic [15:0] shadow,
-    output logic [15:0] loop_cnt,
-    output logic [11:0] loop_tgt,
-    output logic        halted,
-    output logic        error,
-    output logic [11:0] error_code,
-    output logic        irq_pending,
-    output logic [11:0] irq_code,
-    output logic        skip_insn,
+    // pipeline handshake
+    input  logic        insn_valid_i,   // ROM output is a valid word this cycle
+    output logic        skip_o,         // that word must be ignored (branch bubble)
 
-    input  logic        start,
-    input  logic        reset_halt,    
-    input  logic        ack,
+    // host commands
+    input  logic        start_i,        // reset state and run from PC = 0
+    input  logic        reset_halt_i,   // reset state and stay halted
 
-    input  logic        loop_cnt_we,
-    input  logic [15:0] loop_cnt_in,
-    input  logic        loop_tgt_we,
-    input  logic [11:0] loop_tgt_in,
-    input  logic        shadow_we,
-    input  logic [15:0] shadow_in
+    // state
+    output logic [11:0] pc_o,
+    output logic [15:0] shadow_o,
+    output logic [15:0] loop_cnt_o,
+    output logic [11:0] loop_tgt_o,
+    output logic        halted_o,
+    output logic        error_o,
+    output logic [11:0] error_code_o,
+    output logic        irq_pending_o,
+    output logic [7:0]  irq_code_o,
+
+    // register writes from the operand map (already gated by top)
+    input  logic        loop_cnt_we_i,
+    input  logic [15:0] loop_cnt_i,
+    input  logic        loop_tgt_we_i,
+    input  logic [11:0] loop_tgt_i,
+    input  logic        shadow_we_i,
+    input  logic [15:0] shadow_i,
+
+    output logic        commit_o,       // word commits (not skipped, running)
+    input  logic        irq_ack_i       // clear irq_pending (read of IRQ_CODE)
 );
 
-    function automatic logic cond_true(input logic [3:0] cd,
+    // control operations (FLUSH, NOP and reserved codes are decoded in top)
+    localparam logic [3:0] CTRL_NOP   = 4'd0;
+    localparam logic [3:0] CTRL_JMP   = 4'd1;
+    localparam logic [3:0] CTRL_CALL  = 4'd2;
+    localparam logic [3:0] CTRL_RET   = 4'd3;
+    localparam logic [3:0] CTRL_HALT  = 4'd4;
+    localparam logic [3:0] CTRL_IRQ   = 4'd5;
+    localparam logic [3:0] CTRL_FLUSH = 4'd6;
+    localparam logic [3:0] CTRL_RSV   = 4'd7;
+
+    function automatic logic eval_cond(input logic [3:0] cd,
                                        input logic zz, nn, cc, vv);
         case (cd)
-            4'd0:  cond_true = 1'b1;
-            4'd1:  cond_true = zz;
-            4'd2:  cond_true = ~zz;
-            4'd3:  cond_true = cc;
-            4'd4:  cond_true = ~cc;
-            4'd5:  cond_true = nn;
-            4'd6:  cond_true = ~nn;
-            4'd7:  cond_true = vv;
-            4'd8:  cond_true = ~vv;
-            4'd9:  cond_true = cc & ~zz;
-            4'd10: cond_true = ~cc | zz;
-            4'd11: cond_true = (nn == vv);
-            4'd12: cond_true = (nn != vv);
-            4'd13: cond_true = ~zz & (nn == vv);
-            4'd14: cond_true = zz | (nn != vv);
-            default: cond_true = 1'b0;
+            4'd0:    eval_cond = 1'b1;               // AL
+            4'd1:    eval_cond = zz;                 // EQ
+            4'd2:    eval_cond = ~zz;                // NE
+            4'd3:    eval_cond = cc;                 // CS
+            4'd4:    eval_cond = ~cc;                // CC
+            4'd5:    eval_cond = nn;                 // MI
+            4'd6:    eval_cond = ~nn;                // PL
+            4'd7:    eval_cond = vv;                 // VS
+            4'd8:    eval_cond = ~vv;                // VC
+            4'd9:    eval_cond = cc & ~zz;           // HI
+            4'd10:   eval_cond = ~cc | zz;           // LS
+            4'd11:   eval_cond = (nn == vv);         // GE
+            4'd12:   eval_cond = (nn != vv);         // LT
+            4'd13:   eval_cond = ~zz & (nn == vv);   // GT
+            4'd14:   eval_cond = zz | (nn != vv);    // LE
+            default: eval_cond = 1'b0;               // reserved: never
         endcase
     endfunction
 
-    `define OP_NOP   5'd0
-    `define OP_JMP   5'd1
-    `define OP_CALL  5'd2
-    `define OP_RET   5'd3
-    `define OP_HALT  5'd4
-    `define OP_IRQ   5'd5
-    `define OP_FLUSH 5'd6
-    `define OP_RSV   5'd7
+    // ===== state =====
+    logic [11:0] pc_r;
+    logic [15:0] shadow_r;
+    logic [15:0] loop_cnt_r;
+    logic [11:0] loop_tgt_r;
+    logic        halted_r;
+    logic        error_r;
+    logic [11:0] error_code_r;
+    logic        irq_pending_r;
+    logic [7:0]  irq_code_r;
+    logic        was_branch_r;      // previous word was a taken branch / loop return
 
-    logic is_ctrl, active, do_ctrl, taken_branch, use_reg, loop_taken;
-    logic [11:0] branch_target, pc_in;
-    logic was_branch;
+    assign pc_o          = pc_r;
+    assign shadow_o      = shadow_r;
+    assign loop_cnt_o    = loop_cnt_r;
+    assign loop_tgt_o    = loop_tgt_r;
+    assign halted_o      = halted_r;
+    assign error_o       = error_r;
+    assign error_code_o  = error_code_r;
+    assign irq_pending_o = irq_pending_r;
+    assign irq_code_o    = irq_code_r;
+    assign skip_o        = was_branch_r;
+    assign commit_o      = commit_c;
 
-    assign is_ctrl = (imm_class == 2'b10);
-    assign active  = cond_true(cond, z, n, c, v);
-    assign do_ctrl = is_ctrl && active;
-    assign use_reg = r_is_reg && do_ctrl &&
-                     (reg_op == `OP_JMP || reg_op == `OP_CALL);
-    assign branch_target = use_reg ? jmpr_target : imm12;
+    // ===== decode =====
+    logic        is_ctrl_c;     // control-class word
+    logic        cond_ok_c;     // COND is true
+    logic        do_ctrl_c;     // control word that takes effect
+    logic        reg_jump_c;    // JMP/CALL through a register
+    logic        taken_c;       // JMP / CALL / RET taken
+    logic        loop_taken_c;  // L bit and count > 1 and no taken branch
+    logic        run_c;         // a valid word while the core is running
+    logic        commit_c;      // run_c and not a skipped word
+    logic [11:0] target_c;
+    logic [11:0] pc_in_c;
+
+    assign is_ctrl_c  = (insn_class_i == 2'b10);
+    assign cond_ok_c  = eval_cond(cond_i, flag_z_i, flag_n_i, flag_c_i, flag_v_i);
+    assign do_ctrl_c  = is_ctrl_c && cond_ok_c;
+    assign reg_jump_c = use_reg_i && do_ctrl_c &&
+                        (ctrl_op_i == CTRL_JMP || ctrl_op_i == CTRL_CALL);
+    assign target_c   = reg_jump_c ? reg_target_i : addr_i;
 
     always_comb begin
-        taken_branch = 1'b0;
-        if (do_ctrl) begin
-            case (reg_op)
-                `OP_JMP, `OP_CALL, `OP_RET: taken_branch = 1'b1;
-                default: taken_branch = 1'b0;
+        taken_c = 1'b0;
+        if (do_ctrl_c) begin
+            case (ctrl_op_i)
+                CTRL_JMP, CTRL_CALL, CTRL_RET: taken_c = 1'b1;
+                default:                       taken_c = 1'b0;
             endcase
         end
     end
 
-    assign loop_taken = l && (loop_cnt > 16'd1) && !taken_branch;
-    assign skip_insn  = was_branch;
+    assign loop_taken_c = loop_i && (loop_cnt_r > 16'd1) && !taken_c;
+    assign run_c        = insn_valid_i && !halted_r && !error_r;
+    assign commit_c     = run_c && !was_branch_r;
 
-    // combinational PC input
+    // ===== next PC =====
     always_comb begin
-        if (start)
-            pc_in = 12'h0;
-        else if (rst || halted || error || !ack || skip_insn)
-            pc_in = pc;
-        else if (taken_branch)
-            pc_in = (reg_op == `OP_RET) ? shadow[11:0] : branch_target;
-        else if (loop_taken)
-            pc_in = loop_tgt;
+        if (start_i)
+            pc_in_c = 12'h0;
+        else if (!commit_c)
+            pc_in_c = pc_r;
+        else if (taken_c)
+            pc_in_c = (ctrl_op_i == CTRL_RET) ? shadow_r[11:0] : target_c;
+        else if (loop_taken_c)
+            pc_in_c = loop_tgt_r;
         else
-            pc_in = pc + 12'd1;
+            pc_in_c = pc_r + 12'd1;
     end
 
+    // ===== branch bubble =====
     always_ff @(posedge clk) begin
-        if (rst || start)
-            was_branch <= 1'b0;
-        else if (ack && !halted && !error) begin
-            if (skip_insn)                       was_branch <= 1'b0;
-            else if (taken_branch || loop_taken) was_branch <= 1'b1;
+        if (rst || start_i)
+            was_branch_r <= 1'b0;
+        else if (run_c) begin
+            if (was_branch_r)                   was_branch_r <= 1'b0;
+            else if (taken_c || loop_taken_c)   was_branch_r <= 1'b1;
         end
     end
 
+    // ===== state update =====
     always_ff @(posedge clk) begin
         if (rst) begin
-            pc          <= 12'h0;
-            shadow      <= 16'h0;
-            loop_cnt    <= 16'h0;
-            loop_tgt    <= 12'h0;
-            halted      <= 1'b1;
-            error       <= 1'b0;
-            error_code  <= 12'h0;
-            irq_pending <= 1'b0;
-            irq_code    <= 12'h0;
-        end else if (reset_halt) begin
-            pc          <= 12'h0;
-            halted      <= 1'b1;
-            error       <= 1'b0;
-            error_code  <= 12'h0;
-            irq_pending <= 1'b0;
-            irq_code    <= 12'h0;            
-        end else if (start) begin
-            pc          <= 12'h0;
-            halted      <= 1'b0;
-            error       <= 1'b0;
-            error_code  <= 12'h0;
-            irq_pending <= 1'b0;
-            irq_code    <= 12'h0;
+            pc_r          <= 12'h0;
+            shadow_r      <= 16'h0;
+            loop_cnt_r    <= 16'h0;
+            loop_tgt_r    <= 12'h0;
+            halted_r      <= 1'b1;
+            error_r       <= 1'b0;
+            error_code_r  <= 12'h0;
+            irq_pending_r <= 1'b0;
+            irq_code_r    <= 8'h0;
+        end else if (reset_halt_i) begin
+            pc_r          <= 12'h0;
+            shadow_r      <= 16'h0;
+            loop_cnt_r    <= 16'h0;
+            loop_tgt_r    <= 12'h0;
+            halted_r      <= 1'b1;
+            error_r       <= 1'b0;
+            error_code_r  <= 12'h0;
+            irq_pending_r <= 1'b0;
+            irq_code_r    <= 8'h0;
+            was_branch_r  <= 1'b0;
+        end else if (start_i) begin
+            pc_r          <= 12'h0;
+            halted_r      <= 1'b0;
+            error_r       <= 1'b0;
+            error_code_r  <= 12'h0;
+            irq_pending_r <= 1'b0;
+            irq_code_r    <= 8'h0;
+            was_branch_r  <= 1'b0;            
         end else begin
-            pc <= pc_in;
+            pc_r <= pc_in_c;
 
-            if (loop_cnt_we) loop_cnt <= loop_cnt_in;
-            else if (ack && !halted && !error && !skip_insn && loop_taken)
-                loop_cnt <= loop_cnt - 16'd1;
+            // IRQ clear on ack (host read IRQ_CODE)
+            if (irq_ack_i) irq_pending_r <= 1'b0;
 
-            if (loop_tgt_we) loop_tgt <= loop_tgt_in;
+            // LOOP count: explicit write wins over the automatic decrement
+            if (loop_cnt_we_i)
+                loop_cnt_r <= loop_cnt_i;
+            else if (commit_c && loop_taken_c)
+                loop_cnt_r <= loop_cnt_r - 16'd1;
 
-            if (ack && !halted && !error && !skip_insn && do_ctrl &&
-                reg_op == `OP_CALL)
-                shadow <= {v, c, n, z, pc};
-            else if (shadow_we)
-                shadow <= shadow_in;
+            if (loop_tgt_we_i)
+                loop_tgt_r <= loop_tgt_i;
 
-            if (ack && !halted && !error && !skip_insn && do_ctrl) begin
-                case (reg_op)
-                    `OP_HALT: begin
-                        if (imm12 == 12'h0) halted <= 1'b1;
+            // SHADOW: CALL wins over an explicit write
+            if (commit_c && do_ctrl_c && ctrl_op_i == CTRL_CALL)
+                shadow_r <= {flag_v_i, flag_c_i, flag_n_i, flag_z_i, pc_r};
+            else if (shadow_we_i)
+                shadow_r <= shadow_i;
+
+            // HALT / IRQ
+            if (commit_c && do_ctrl_c) begin
+                case (ctrl_op_i)
+                    CTRL_HALT: begin
+                        if (addr_i == 12'h0) halted_r <= 1'b1;
                         else begin
-                            error      <= 1'b1;
-                            error_code <= imm12;
+                            error_r      <= 1'b1;
+                            error_code_r <= addr_i;
                         end
                     end
-                    `OP_IRQ: begin
-                        irq_pending <= 1'b1;
-                        irq_code    <= imm12;
+                    CTRL_IRQ: begin
+                        irq_pending_r <= 1'b1;
+                        irq_code_r    <= addr_i[7:0];
                     end
                     default: ;
                 endcase
@@ -186,4 +255,3 @@ module sequencer (
     end
 
 endmodule
-

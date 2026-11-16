@@ -8,7 +8,7 @@ BUILD    := build
 
 # RTL for synthesis (top_fpga is the FPGA top; top.sv is included since top_fpga instantiates it)
 RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_blender.sv rtl/pixel_engine.sv \
-       rtl/gpu_cache.sv rtl/sequencer.sv rtl/microcode_rom.sv \
+       rtl/gpu_cache.sv rtl/gpu_host.sv rtl/sequencer.sv rtl/microcode_rom.sv \
        rtl/top.sv rtl/top_fpga.sv
 
 TOP := top_fpga
@@ -99,6 +99,16 @@ sim-gpu-cache:
 	    -Mdir $(CURDIR)/$(BUILD)/sim_gpu_cache \
 	    rtl/gpu_cache.sv $(CURDIR)/sim/tb_gpu_cache.cpp
 	./$(BUILD)/sim_gpu_cache/Vgpu_cache
+
+sim-gpu-host: asm pack
+	mkdir -p $(BUILD)/sim_gpu_host
+	verilator --cc --exe --build -j 1 \
+	    -DSIMULATION \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module gpu_host \
+	    -Mdir $(CURDIR)/$(BUILD)/sim_gpu_host \
+	    rtl/gpu_host.sv $(CURDIR)/sim/tb_gpu_host.cpp
+	./$(BUILD)/sim_gpu_host/Vgpu_host
 
 # ---- image roundtrip (host-only, no Verilator) ----
 IMAGE_IO_SRC := sim/image_io.cpp

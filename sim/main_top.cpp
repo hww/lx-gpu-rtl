@@ -53,7 +53,7 @@ static void tick(int clk, bool log) {
     if (log && g_verbose) {
         printf("t=%llu pc=%03X halted=%d error=%d ack=%d\n",
             (unsigned long long)cycles,
-            (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__pc,
+            (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__seq__DOT__pc_r,
             (int)dut->halted, (int)dut->error,
             (int)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__ack);
     }
@@ -316,7 +316,7 @@ int main(int argc, char** argv) {
     printf("registers R0..R31:\n");
     for (int i = 0; i < 32; i++) {
         printf("  R%02d = %04X\n", i,
-            (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem[i]);
+            (unsigned)dut->rootp->tb_top_wrapper__DOT__u_top__DOT__rf__DOT__mem_a[i]);
     }
 
     if (dst_raw) save_file(dst_raw, dst_off, dst_size);

@@ -3,6 +3,15 @@
 
 // top: LX-GPU core.
 //
+// Naming:
+//   *_i / *_o        ports of top
+//   u_<blk>          instance of block <blk>; wires it drives are <blk>_<port>
+//   ins_*            fields decoded from the instruction word (rom_fetch_data)
+//   flag_*_r         Z N C V registers
+//   ex_*             execute control
+//   t_*              other signals produced by top; t_<blk>_<port> drives <blk>.<port>
+//   *_r              registers
+//
 // Operand map (6 bits):
 //   0..31   R0..R31
 //   32      ZERO
@@ -23,447 +32,500 @@
 //   60..63  PAGE[0..3]
 //
 // ROM protocol:
-//   MOV ROMA, R      -> set address
-//   MOV ROML, R      -> low 16 bits (no increment)
-//   MOV ROMH, R      -> high 16 bits, ROMA++
-//   MOV Rd, ROML     -> read low 16 (no increment)
-//   MOV Rd, ROMH     -> read high 16, ROMA++
+//   MOV ROMA, R   -> set address
+//   MOV ROML, R   -> low 16 bits (no increment)
+//   MOV ROMH, R   -> high 16 bits, write the word, ROMA++
+//   MOV Rd, ROML  -> read low 16 (no increment)
+//   MOV Rd, ROMH  -> read high 16, ROMA++
 //
-// ack: any instruction waits for ack. Formed per-instruction:
-//   DATA read   -> pb_ack
-//   ROM read    -> rom_wait (1 cycle for BRAM port A)
-//   DATA write  -> gc_access_done
-//   everything else -> 1
+// ex_ack: an instruction completes when ex_ack = 1:
+//   DATA read  -> blend_ack
+//   ROM read   -> t_rom_wait_r (1 cycle, BRAM access port)
+//   DATA write -> gc_access_done
+//   others     -> 1
 module top (
     input  logic        clk,
     input  logic        rst,
-    output logic        halted,
-    output logic        error,
-    output logic [11:0] error_code,
-    input  logic        start,
-    input  logic        gpu_start,
-    input  logic        gpu_reset,
-    input  logic [23:0] gpu_addr,
 
-    output logic        wb_cyc,
-    output logic        wb_stb,
-    output logic        wb_we,
-    output logic [23:0] wb_adr,
+    // host interface
+    input  logic        start_i,        // run from PC = 0 (no channel preload)
+    input  logic        gpu_start_i,    // host START: preload stream channel, run
+    input  logic        gpu_reset_i,    // host RESET: stop and clear
+    input  logic [23:0] gpu_addr_i,     // byte address of the first packet
+    output logic        halted_o,
+    output logic        error_o,
+    output logic [11:0] error_code_o,
+    output logic [11:0] pc_o,
+
+    // Wishbone master
+    output logic        wb_cyc_o,
+    output logic        wb_stb_o,
+    output logic        wb_we_o,
+    output logic [23:0] wb_adr_o,
     output logic [15:0] wb_dat_o,
     input  logic [15:0] wb_dat_i,
-    input  logic        wb_ack
+    input  logic        wb_ack_i
 );
 
-    // ===== ROM =====
-    logic [11:0] pc;
-    logic [31:0] insn;
-    logic        ack;
+    // ================================================================
+    // Declarations
+    // ================================================================
 
-    // port A (data access from ISA)
-    logic        rom_a_we, rom_a_re;
-    logic [11:0] rom_a_addr;
-    logic [31:0] rom_a_wdata;
-    logic [31:0] rom_a_rdata;
+    // ---- microcode ROM ----
+    logic [31:0] rom_fetch_data;
+    logic [31:0] rom_acc_rdata;
+    logic        t_rom_acc_we, t_rom_acc_re;
+    logic [31:0] t_rom_acc_wdata;
+    logic [11:0] t_roma_r;
+    logic [15:0] t_roml_r;
+    logic        t_rom_wait_r;
 
-    // ROMA register (maintained by top)
-    logic [11:0] roma;
+    // ---- instruction fields ----
+    logic        ins_l;
+    logic [1:0]  ins_class;      // {J, I}: 00 reg-reg, 11 reg-imm, 01 LDI, 10 control
+    logic [5:0]  ins_dst;
+    logic        ins_write;
+    logic [3:0]  ins_cond;
+    logic        ins_f;
+    logic [4:0]  ins_alu_op;
+    logic [3:0]  ins_ctrl_op;
+    logic        ins_r;          // control class: JMP/CALL target from a register
+    logic [5:0]  ins_src;
+    logic        ins_sx;
+    logic [10:0] ins_imm11;
+    logic [11:0] ins_addr;
+    logic [15:0] ins_imm16;
+    logic        ins_is_ldi, ins_is_ctrl, ins_is_mov, ins_is_flush;
+    logic        ins_is_data_rd, ins_is_rom_rd, ins_is_data_wr;
 
-    // external load mux (simulation)
-    logic        rom_a_we_mux;
-    logic [11:0] rom_a_addr_mux;
-    logic [31:0] rom_a_wdata_mux;
+    // ---- flags, condition, execute control ----
+    logic        flag_z_r, flag_n_r, flag_c_r, flag_v_r;
+    logic        cond_ok;
+    logic        ex_ack;          // instruction can complete this cycle
+    logic        ex_complete;     // ex_ack and the core is running and not skipped
+    logic        ex_issue;        // same without ex_ack (launches port accesses)
+    logic        ex_do;           // ex_complete and COND true
+    logic        ex_issue_do;     // ex_issue and COND true
 
-    assign rom_a_we_mux    = rom_a_we;
-    assign rom_a_addr_mux  = rom_a_addr;
-    assign rom_a_wdata_mux = rom_a_wdata;
+    // ---- register file ----
+    logic [4:0]  t_rf_opa_addr, t_rf_opb_addr, t_rf_wr_addr;
+    logic        t_rf_wr_en;
+    logic [15:0] t_rf_wr_data;
+    logic [15:0] rf_opa_data, rf_opb_data;
 
-    microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
-                    .INIT_FILE("rtl/bootloader.hex")) rom (
-        .clk(clk), .rst(rst),
-        .addr(pc), .data(insn), .ack(ack),
-        .we(rom_a_we), .waddr(rom_a_addr), .wdata(rom_a_wdata),
-        .rdata_a(rom_a_rdata), .re(rom_a_re)
-    );
+    // ---- ALU ----
+    logic [15:0] t_alu_b;
+    logic [15:0] alu_result, alu_mul_hi;
+    logic        alu_flag_z, alu_flag_n, alu_flag_c, alu_flag_v, alu_upd_cv;
+    logic [15:0] t_mhi_r;
 
-    // ===== decode =====
-    logic        l;
-    logic [1:0]  imm_class;
-    logic [5:0]  dst_code;
-    logic        write_en;
-    logic [3:0]  cond;
-    logic        f;
-    logic [4:0]  reg_op;
-    logic        r_is_reg;
-    logic [5:0]  src;
-    logic        sx;
-    logic [10:0] imm11;
-    logic [11:0] imm12_ctrl;
-    logic [15:0] imm16;
-    logic        is_ldi, is_ctrl;
+    // ---- sequencer ----
+    logic        t_seq_start;
+    logic [11:0] t_seq_reg_target;
+    logic        t_seq_irq_ack;
+    logic        t_seq_loop_cnt_we, t_seq_loop_tgt_we, t_seq_shadow_we;
+    logic [15:0] t_seq_loop_cnt, t_seq_shadow;
+    logic [11:0] t_seq_loop_tgt;
+    logic [11:0] seq_pc;
+    logic [15:0] seq_shadow, seq_loop_cnt;
+    logic [11:0] seq_loop_tgt;
+    logic        seq_halted, seq_error;
+    logic [11:0] seq_error_code;
+    logic        seq_irq_pending;
+    logic [7:0]  seq_irq_code;
+    logic        seq_skip, seq_commit;
 
-    assign l          = insn[31];
-    assign imm_class  = {insn[30], insn[29]};
-    assign dst_code   = insn[28:23];
-    assign write_en   = insn[22];
-    assign cond       = insn[21:18];
-    assign f          = insn[17];
-    assign reg_op     = insn[16:12];
-    assign r_is_reg   = insn[16];
-    assign src        = insn[11:6];
-    assign sx         = insn[11];
-    assign imm11      = insn[10:0];
-    assign imm12_ctrl = insn[11:0];
-    assign imm16      = insn[15:0];
-    assign is_ldi     = (imm_class == 2'b01);
-    assign is_ctrl    = (imm_class == 2'b10);
+    // ---- pixel engine (channel pointers) ----
+    logic [1:0]  t_ch;            // selected channel, shared by pe and gc
+    logic        t_pe_mode_we, t_pe_idxh_we, t_pe_idx_we, t_pe_step_we;
+    logic [2:0]  t_pe_mode, t_pe_idxh;
+    logic [15:0] t_pe_idx, t_pe_step;
+    logic        t_pe_access;
+    logic [14:0] pe_word;
+    logic [3:0]  pe_pos;
+    logic [2:0]  pe_mode;
+    logic        pe_prefetch;
 
-    logic skip_insn;
+    // ---- cache ----
+    logic        t_gc_access, t_gc_we;
+    logic [15:0] t_gc_wdata;
+    logic        t_gc_page_we;
+    logic [7:0]  t_gc_page;
+    logic        t_gc_flush_en;
+    logic [1:0]  t_gc_flush_ch;
+    logic        gc_hit, gc_access_done, gc_flush_done, gc_error;
+    logic [15:0] gc_rdata;
+    logic [7:0]  gc_page;
+    logic [23:0] gc_addr24;
+    logic        gc_wb_cyc, gc_wb_stb, gc_wb_we;
+    logic [23:0] gc_wb_adr;
+    logic [15:0] gc_wb_dat;
 
-    // ===== flags =====
-    logic z_r, n_r, c_r, v_r;
-    logic z, n, c, v;
-    assign z = z_r; assign n = n_r; assign c = c_r; assign v = v_r;
+    // ---- pixel blender ----
+    logic        t_blend_read;
+    logic [15:0] t_pixel_r;
+    logic [15:0] blend_pixel, blend_word;
+    logic        blend_ack, blend_busy;
 
-    logic alu_z, alu_n, alu_c, alu_v;
-    logic [15:0] alu_mhi;
+    // ---- special-operand read ----
+    logic [15:0] t_sp_rdata;
 
-    logic cond_ok;
+    // ================================================================
+    // Instruction decode
+    // NOTE: field positions below are the OLD layout (DST [28:23], WRITE 22,
+    // COND [21:18], F 17). The accepted layout is COND [28:25], WRITE 24,
+    // F 23, DST [22:17]. Update this block together with the assembler.
+    // ================================================================
+    assign ins_l       = rom_fetch_data[31];
+    assign ins_class   = {rom_fetch_data[30], rom_fetch_data[29]};
+    assign ins_cond    = rom_fetch_data[28:25];
+    assign ins_write   = rom_fetch_data[24];
+    assign ins_f       = rom_fetch_data[23];
+    assign ins_dst     = rom_fetch_data[22:17];
+    assign ins_alu_op  = rom_fetch_data[16:12];
+    assign ins_r       = rom_fetch_data[16];
+    assign ins_ctrl_op = rom_fetch_data[15:12];
+    assign ins_imm16   = rom_fetch_data[15:0];
+    assign ins_src     = rom_fetch_data[11:6];
+    assign ins_sx      = rom_fetch_data[11];
+    assign ins_imm11   = rom_fetch_data[10:0];
+    assign ins_addr    = rom_fetch_data[11:0];
+
+    assign ins_is_ldi  = (ins_class == 2'b01);
+    assign ins_is_ctrl = (ins_class == 2'b10);
+    assign ins_is_mov  = (ins_alu_op == 5'd0) && !ins_is_ctrl && !ins_is_ldi;
+    assign ins_is_flush = ins_is_ctrl && ({ins_r, ins_ctrl_op} == 5'd6);
+
+    assign ins_is_data_rd = !ins_is_ctrl && (ins_src >= 6'd44 && ins_src < 6'd48);
+    assign ins_is_rom_rd  = !ins_is_ctrl && (ins_src == 6'd38 || ins_src == 6'd39);
+    assign ins_is_data_wr = ins_is_mov && (ins_dst >= 6'd44 && ins_dst < 6'd48);
+
+    // ================================================================
+    // Condition and execute control
+    // ================================================================
     always_comb begin
-        case (cond)
-            4'd0:  cond_ok = 1'b1;
-            4'd1:  cond_ok = z_r;
-            4'd2:  cond_ok = ~z_r;
-            4'd3:  cond_ok = c_r;
-            4'd4:  cond_ok = ~c_r;
-            4'd5:  cond_ok = n_r;
-            4'd6:  cond_ok = ~n_r;
-            4'd7:  cond_ok = v_r;
-            4'd8:  cond_ok = ~v_r;
-            4'd9:  cond_ok = c_r & ~z_r;
-            4'd10: cond_ok = ~c_r | z_r;
-            4'd11: cond_ok = (n_r == v_r);
-            4'd12: cond_ok = (n_r != v_r);
-            4'd13: cond_ok = ~z_r & (n_r == v_r);
-            4'd14: cond_ok = z_r | (n_r != v_r);
+        case (ins_cond)
+            4'd0:    cond_ok = 1'b1;
+            4'd1:    cond_ok = flag_z_r;
+            4'd2:    cond_ok = ~flag_z_r;
+            4'd3:    cond_ok = flag_c_r;
+            4'd4:    cond_ok = ~flag_c_r;
+            4'd5:    cond_ok = flag_n_r;
+            4'd6:    cond_ok = ~flag_n_r;
+            4'd7:    cond_ok = flag_v_r;
+            4'd8:    cond_ok = ~flag_v_r;
+            4'd9:    cond_ok = flag_c_r & ~flag_z_r;
+            4'd10:   cond_ok = ~flag_c_r | flag_z_r;
+            4'd11:   cond_ok = (flag_n_r == flag_v_r);
+            4'd12:   cond_ok = (flag_n_r != flag_v_r);
+            4'd13:   cond_ok = ~flag_z_r & (flag_n_r == flag_v_r);
+            4'd14:   cond_ok = flag_z_r | (flag_n_r != flag_v_r);
             default: cond_ok = 1'b0;
         endcase
     end
 
-    logic exec, run;
-    assign exec = ack && !skip_insn && !halted && !error;
-    // run: side-effect launch (no ack dependency) — breaks ack<->exec<->gc_access loop
-    assign run  = !skip_insn && !halted && !error;
+    assign ex_complete = ex_ack && !seq_skip && !seq_halted && !seq_error;
+    // ex_issue does not depend on ex_ack: it breaks the loop
+    // ex_ack <-> ex_complete <-> gc_access_done
+    assign ex_issue    = !seq_skip && !seq_halted && !seq_error;
+    assign ex_do       = ex_complete && cond_ok;
+    assign ex_issue_do = ex_issue && cond_ok;
 
-    // ===== regfile =====
-    logic [4:0]  ra, rb, wa;
-    logic [15:0] rdata_a, rdata_b, wdata;
-    logic        we_rf;
-    regfile rf (
-        .clk(clk), .rst(rst),
-        .ra(ra), .rdata_a(rdata_a),
-        .rb(rb), .rdata_b(rdata_b),
-        .we(we_rf), .wa(wa), .wdata(wdata)
+    assign ex_ack = ins_is_data_rd ? blend_ack
+                  : ins_is_rom_rd  ? t_rom_wait_r
+                  : ins_is_data_wr ? gc_access_done
+                  : 1'b1;
+
+    // ================================================================
+    // Blocks
+    // ================================================================
+    microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
+                    .INIT_FILE("rtl/bootloader.hex")) u_rom (
+        .clk(clk),
+        .fetch_en_i(ex_ack),
+        .fetch_addr_i(seq_pc),
+        .fetch_data_o(rom_fetch_data),
+        .acc_we_i(t_rom_acc_we),
+        .acc_re_i(t_rom_acc_re),
+        .acc_addr_i(t_roma_r),
+        .acc_wdata_i(t_rom_acc_wdata),
+        .acc_rdata_o(rom_acc_rdata)
     );
 
-    // ===== ALU =====
-    logic [4:0]  alu_op;
-    logic [15:0] alu_a, alu_b, alu_res;
-    alu al (
-        .clk(clk), .rst(rst),
-        .op(alu_op), .a(alu_a), .b(alu_b), .c_in(c_r),
-        .res(alu_res), .mhi(alu_mhi),
-        .z(alu_z), .n(alu_n), .c(alu_c), .v(alu_v)
+    regfile u_rf (
+        .clk(clk),
+        .opa_addr_i(t_rf_opa_addr), .opa_data_o(rf_opa_data),
+        .opb_addr_i(t_rf_opb_addr), .opb_data_o(rf_opb_data),
+        .wr_en_i(t_rf_wr_en), .wr_addr_i(t_rf_wr_addr), .wr_data_i(t_rf_wr_data)
     );
 
-    // ===== sequencer =====
-    logic [15:0] shadow, loop_cnt;
-    logic [11:0] loop_tgt;
-    logic        irq_pending;
-    logic [11:0] irq_code, jmpr_target;
-    logic        loop_cnt_we, loop_tgt_we, shadow_we;
-    logic [15:0] loop_cnt_in, shadow_in;
-    logic [11:0] loop_tgt_in;
-
-    sequencer seq (
-        .clk(clk), .rst(rst),
-        .start(start | gpu_start),
-        .reset_halt(gpu_reset),
-        .imm_class(imm_class), .reg_op(reg_op), .cond(cond),
-        .l(l), .imm12(imm12_ctrl), .r_is_reg(r_is_reg),
-        .z(z_r), .n(n_r), .c(c_r), .v(v_r),
-        .jmpr_target(jmpr_target),
-        .pc(pc), .shadow(shadow),
-        .loop_cnt(loop_cnt), .loop_tgt(loop_tgt),
-        .halted(halted), .error(error), .error_code(error_code),
-        .irq_pending(irq_pending), .irq_code(irq_code),
-        .skip_insn(skip_insn),
-        .ack(ack),
-        .loop_cnt_we(loop_cnt_we), .loop_cnt_in(loop_cnt_in),
-        .loop_tgt_we(loop_tgt_we), .loop_tgt_in(loop_tgt_in),
-        .shadow_we(shadow_we), .shadow_in(shadow_in)
+    alu u_alu (
+        .alu_op(ins_alu_op), .a(rf_opa_data), .b(t_alu_b), .carry_in(flag_c_r),
+        .result(alu_result), .mul_hi(alu_mul_hi),
+        .flag_z(alu_flag_z), .flag_n(alu_flag_n),
+        .flag_c(alu_flag_c), .flag_v(alu_flag_v),
+        .upd_cv(alu_upd_cv)
     );
 
-    // ===== pixel_engine =====
-    logic [1:0]  pe_ch;
-    logic        pe_mode_we, pe_idxh_we, pe_idx_we, pe_step_we;
-    logic [2:0]  pe_mode_in, pe_idxh_in;
-    logic [15:0] pe_idx_in, pe_step_in;
-    logic        pe_access;
-    logic [14:0] pe_word_out;
-    logic [3:0]  pe_pos;
-    logic [2:0]  pe_mode;
-    logic        pe_prefetch_req;
+    assign t_seq_start   = start_i | gpu_start_i;
+    assign t_seq_irq_ack = 1'b0;
 
-    pixel_engine pe (
+    sequencer u_seq (
         .clk(clk), .rst(rst),
-        .ch(pe_ch),
-        .mode_we(pe_mode_we), .mode_in(pe_mode_in),
-        .idxh_we(pe_idxh_we), .idxh_in(pe_idxh_in),
-        .idx_we(pe_idx_we),   .idx_in(pe_idx_in),
-        .step_we(pe_step_we), .step_in(pe_step_in),
-        .access(pe_access),
-        .access_done(pb_ack),
-        .word_out(pe_word_out),
-        .pos(pe_pos), .mode(pe_mode),
-        .prefetch_req(pe_prefetch_req)
+        .start_i(t_seq_start),
+        .reset_halt_i(gpu_reset_i),
+        .insn_class_i(ins_class), .ctrl_op_i(ins_ctrl_op), .cond_i(ins_cond),
+        .loop_i(ins_l), .addr_i(ins_addr), .use_reg_i(ins_r),
+        .reg_target_i(t_seq_reg_target),
+        .flag_z_i(flag_z_r), .flag_n_i(flag_n_r),
+        .flag_c_i(flag_c_r), .flag_v_i(flag_v_r),
+        .insn_valid_i(ex_ack),
+        .skip_o(seq_skip),
+        .commit_o(seq_commit),
+        .pc_o(seq_pc), .shadow_o(seq_shadow),
+        .loop_cnt_o(seq_loop_cnt), .loop_tgt_o(seq_loop_tgt),
+        .halted_o(seq_halted), .error_o(seq_error), .error_code_o(seq_error_code),
+        .irq_pending_o(seq_irq_pending), .irq_code_o(seq_irq_code),
+        .irq_ack_i(t_seq_irq_ack),
+        .loop_cnt_we_i(t_seq_loop_cnt_we), .loop_cnt_i(t_seq_loop_cnt),
+        .loop_tgt_we_i(t_seq_loop_tgt_we), .loop_tgt_i(t_seq_loop_tgt),
+        .shadow_we_i(t_seq_shadow_we), .shadow_i(t_seq_shadow)
     );
 
-    // ===== gpu_cache =====
-    logic        gc_page_we;
-    logic [7:0]  gc_page_in, gc_page_out;
-    logic        gc_flush_en, gc_flush_done;
-    logic [1:0]  gc_flush_ch;
-    logic        gc_access, gc_we;
-    logic [15:0] gc_wdata;
-    logic        gc_hit;
-    logic [15:0] gc_rdata;
-    logic        gc_access_done;
-    logic        gc_wb_cyc, gc_wb_stb, gc_wb_we;
-    logic [23:0] gc_wb_adr;
-    logic [15:0] gc_wb_dat_o;
-    logic [23:0] gc_addr24;
-    logic        gc_error;
-
-    gpu_cache gc (
+    pixel_engine u_pe (
         .clk(clk), .rst(rst),
-        .ch(pe_ch),
-        .word_in(pe_word_out),
-        .access(gc_access),
-        .prefetch_req(pe_prefetch_req),
-        .page_we(gc_page_we), .page_in(gc_page_in), .page_out(gc_page_out),
-        .flush_en(gc_flush_en), .flush_ch(gc_flush_ch), .flush_done(gc_flush_done),
-        .we(gc_we), .wdata(gc_wdata),
-        .hit(gc_hit), .rdata(gc_rdata), .access_done(gc_access_done),
+        .ch_i(t_ch),
+        .mode_we_i(t_pe_mode_we), .mode_i(t_pe_mode),
+        .idxh_we_i(t_pe_idxh_we), .idxh_i(t_pe_idxh),
+        .idx_we_i(t_pe_idx_we),   .idx_i(t_pe_idx),
+        .step_we_i(t_pe_step_we), .step_i(t_pe_step),
+        .access_i(t_pe_access),
+        .access_done_i(blend_ack),
+        .word_o(pe_word), .pos_o(pe_pos), .mode_o(pe_mode),
+        .prefetch_o(pe_prefetch)
+    );
+
+    gpu_cache u_gc (
+        .clk(clk), .rst(rst),
+        .ch_i(t_ch),
+        .word_i(pe_word),
+        .access_i(t_gc_access),
+        .prefetch_i(pe_prefetch),
+        .we_i(t_gc_we), .wdata_i(t_gc_wdata),
+        .hit_o(gc_hit), .rdata_o(gc_rdata), .access_done_o(gc_access_done),
+        .page_we_i(t_gc_page_we), .page_i(t_gc_page), .page_o(gc_page),
+        .flush_en_i(t_gc_flush_en), .flush_ch_i(t_gc_flush_ch),
+        .flush_done_o(gc_flush_done),
         .wb_cyc_o(gc_wb_cyc), .wb_stb_o(gc_wb_stb), .wb_we_o(gc_wb_we),
-        .wb_adr_o(gc_wb_adr), .wb_dat_o(gc_wb_dat_o),
-        .wb_ack_i(wb_ack), .wb_dat_i(wb_dat_i),
-        .addr24(gc_addr24), .error(gc_error)
+        .wb_adr_o(gc_wb_adr), .wb_dat_o(gc_wb_dat),
+        .wb_ack_i(wb_ack_i), .wb_dat_i(wb_dat_i),
+        .addr24_o(gc_addr24), .error_o(gc_error)
     );
 
-    // ===== pixel_blender =====
-    logic        pb_start, pb_read;
-    logic [2:0]  pb_mode;
-    logic [3:0]  pb_pos;
-    logic [15:0] pb_word_in, pb_pixel_in;
-    logic [15:0] pb_pixel_out, pb_word_out;
-    logic        pb_ack, pb_busy;
-
-    pixel_blender pb (
+    pixel_blender u_blend (
         .clk(clk), .rst(rst),
-        .start(pb_start),
-        .read(pb_read), .mode(pb_mode), .pos(pb_pos),
-        .word_in(pb_word_in), .pixel_in(pb_pixel_in),
-        .pixel_out(pb_pixel_out), .word_out(pb_word_out),
-        .ack(pb_ack), .busy(pb_busy)
+        .start_i(gc_access_done),
+        .is_read_i(t_blend_read), .mode_i(pe_mode), .pos_i(pe_pos),
+        .word_i(gc_rdata), .pixel_i(t_pixel_r),
+        .pixel_o(blend_pixel), .word_o(blend_word),
+        .ack_o(blend_ack), .busy_o(blend_busy)
     );
 
-    assign pb_mode    = pe_mode;
-    assign pb_pos     = pe_pos;
-    assign pb_word_in = gc_rdata;
-    assign pb_start   = gc_access_done;
-
-    logic [15:0] pb_pixel_in_r;
+    // pixel to be written, captured when the write access starts
     always_ff @(posedge clk) begin
-        if (rst) pb_pixel_in_r <= 16'h0;
-        else if (gc_access && gc_we) pb_pixel_in_r <= alu_res;
+        if (rst)                         t_pixel_r <= 16'h0;
+        else if (t_gc_access && t_gc_we) t_pixel_r <= alu_result;
     end
-    assign pb_pixel_in = pb_pixel_in_r;
 
-    // ===== WB =====
-    assign wb_cyc   = gc_wb_cyc;
-    assign wb_stb   = gc_wb_stb;
-    assign wb_we    = gc_wb_we;
-    assign wb_adr   = gc_wb_adr;
-    assign wb_dat_o = gc_wb_dat_o;
+    // ================================================================
+    // Outputs
+    // ================================================================
+    assign halted_o     = seq_halted;
+    assign error_o      = seq_error;
+    assign error_code_o = seq_error_code;
+    assign pc_o         = seq_pc;
 
-    // ===== helpers =====
-    logic is_mov, is_flush;
-    assign is_mov   = (reg_op == 5'b00000) && !is_ctrl && !is_ldi;
-    assign is_flush = is_ctrl && (reg_op == 5'd6);
+    assign wb_cyc_o = gc_wb_cyc;
+    assign wb_stb_o = gc_wb_stb;
+    assign wb_we_o  = gc_wb_we;
+    assign wb_adr_o = gc_wb_adr;
+    assign wb_dat_o = gc_wb_dat;
 
-    assign ra    = dst_code[4:0];
-    assign alu_a = rdata_a;
-
-    // ===== special read =====
-    logic [15:0] sp_rd;
+    // ================================================================
+    // Special-operand read mux
+    // ================================================================
     always_comb begin
-        sp_rd = 16'h0;
-        case (src)
-            6'd32: sp_rd = 16'h0;
-            6'd33: sp_rd = {12'h0, v_r, c_r, n_r, z_r};
-            6'd34: sp_rd = {12'h0, gc_wb_cyc, gc_flush_done,
-                            gc_access_done, gc_hit};
-            6'd35: sp_rd = shadow;
-            6'd36: sp_rd = loop_cnt;
-            6'd37: sp_rd = {4'h0, loop_tgt};
-            6'd38: sp_rd = rom_a_rdata[15:0];
-            6'd39: sp_rd = rom_a_rdata[31:16];
-            6'd40: sp_rd = 16'h0;
-            6'd41: sp_rd = alu_mhi;
-            6'd44, 6'd45, 6'd46, 6'd47: sp_rd = pb_pixel_out;
-            default: sp_rd = 16'h0;
+        t_sp_rdata = 16'h0;
+        case (ins_src)
+            6'd32: t_sp_rdata = 16'h0;
+            6'd33: t_sp_rdata = {12'h0, flag_v_r, flag_c_r, flag_n_r, flag_z_r};
+            6'd34: t_sp_rdata = {12'h0, gc_wb_cyc, gc_flush_done,
+                                 gc_access_done, gc_hit};
+            6'd35: t_sp_rdata = seq_shadow;
+            6'd36: t_sp_rdata = seq_loop_cnt;
+            6'd37: t_sp_rdata = {4'h0, seq_loop_tgt};
+            6'd38: t_sp_rdata = rom_acc_rdata[15:0];
+            6'd39: t_sp_rdata = rom_acc_rdata[31:16];
+            6'd40: t_sp_rdata = 16'h0;
+            6'd41: t_sp_rdata = t_mhi_r;
+            6'd44, 6'd45, 6'd46, 6'd47: t_sp_rdata = blend_pixel;
+            default: t_sp_rdata = 16'h0;
         endcase
     end
 
-    // ===== operand B =====
-    assign rb    = (imm_class == 2'b00 || (is_ctrl && r_is_reg && src < 6'd32))
-                   ? src[4:0] : 5'd0;
-    assign alu_b = (imm_class == 2'b11)
-                   ? (sx && imm11[10] ? {5'h1F, imm11} : {5'h00, imm11})
-                   : (src < 6'd32 ? rdata_b : sp_rd);
+    // ================================================================
+    // Operands and ALU inputs
+    // ================================================================
+    assign t_rf_opa_addr = ins_dst[4:0];
+    assign t_rf_opb_addr = (ins_class == 2'b00 ||
+                            (ins_is_ctrl && ins_r && ins_src < 6'd32))
+                           ? ins_src[4:0] : 5'd0;
 
-    assign alu_op      = reg_op;
-    assign jmpr_target = src < 6'd32 ? rdata_b[11:0] : sp_rd[11:0];
+    assign t_alu_b = (ins_class == 2'b11)
+                   ? (ins_sx && ins_imm11[10] ? {5'h1F, ins_imm11}
+                                              : {5'h00, ins_imm11})
+                   : (ins_src < 6'd32 ? rf_opb_data : t_sp_rdata);
 
-    // ===== read/write classification =====
-    logic is_data_read, is_rom_read, is_data_write;
-    assign is_data_read  = !is_ctrl && (src >= 6'd44 && src < 6'd48);
-    assign is_rom_read   = !is_ctrl && (src == 6'd38 || src == 6'd39);
-    assign is_data_write = is_mov && (dst_code >= 6'd44 && dst_code < 6'd48);
+    assign t_seq_reg_target = (ins_src < 6'd32) ? rf_opb_data[11:0]
+                                                : t_sp_rdata[11:0];
 
-    // ===== ROM access control =====
-    logic [15:0] rom_lo_r;
-    logic [31:0] rom_wdata_c;
-    logic        rom_wait_r;
-
-    always_comb begin
-        rom_wdata_c = {16'h0, rom_lo_r};
-        if (exec && cond_ok && is_mov && (dst_code == 6'd39))
-            rom_wdata_c[31:16] = alu_res;
+    always_ff @(posedge clk) begin
+        if (rst)                                         t_mhi_r <= 16'h0;
+        else if (ex_do && (ins_alu_op == 5'b11000))      t_mhi_r <= alu_mul_hi;
     end
 
-    assign rom_a_we    = exec && cond_ok && is_mov && (dst_code == 6'd39);
-    assign rom_a_addr  = roma;
-    assign rom_a_wdata = rom_wdata_c;
-    assign rom_a_re    = is_rom_read && exec;
+    // ================================================================
+    // ROM access (ROML / ROMH / ROMA)
+    // ================================================================
+    always_comb begin
+        t_rom_acc_wdata = {16'h0, t_roml_r};
+        if (ex_do && ins_is_mov && (ins_dst == 6'd39))
+            t_rom_acc_wdata[31:16] = alu_result;
+    end
+
+    assign t_rom_acc_we = ex_do && ins_is_mov && (ins_dst == 6'd39);
+    assign t_rom_acc_re = ins_is_rom_rd && ex_complete;
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            roma    <= 12'h0;
-            rom_lo_r<= 16'h0;
+            t_roma_r <= 12'h0;
+            t_roml_r <= 16'h0;
         end else begin
-            if (exec && cond_ok && is_mov && (dst_code == 6'd40))
-                roma <= alu_res[11:0];
-            if (exec && cond_ok && is_mov && (dst_code == 6'd38))
-                rom_lo_r <= alu_res;
-            if (exec && cond_ok && is_mov && (dst_code == 6'd39))
-                roma <= roma + 12'd1;
-            if (exec && cond_ok && is_rom_read && (src == 6'd39))
-                roma <= roma + 12'd1;
+            if (ex_do && ins_is_mov && (ins_dst == 6'd40))
+                t_roma_r <= alu_result[11:0];
+            if (ex_do && ins_is_mov && (ins_dst == 6'd38))
+                t_roml_r <= alu_result;
+            if (ex_do && ins_is_mov && (ins_dst == 6'd39))
+                t_roma_r <= t_roma_r + 12'd1;
+            if (ex_do && ins_is_rom_rd && (ins_src == 6'd39))
+                t_roma_r <= t_roma_r + 12'd1;
         end
     end
 
     always_ff @(posedge clk) begin
-        if (rst) rom_wait_r <= 1'b0;
-        else     rom_wait_r <= is_rom_read && exec;
+        if (rst) t_rom_wait_r <= 1'b0;
+        else     t_rom_wait_r <= ins_is_rom_rd && ex_complete;
     end
 
-    // ===== ack =====
-    assign ack = is_data_read  ? pb_ack
-               : is_rom_read   ? rom_wait_r
-               : is_data_write ? gc_access_done
-               : 1'b1;
+    // ================================================================
+    // Register-file writeback
+    // ================================================================
+    assign t_rf_wr_en   = ex_do && ins_write && (ins_dst < 6'd32);
+    assign t_rf_wr_addr = ins_dst[4:0];
+    assign t_rf_wr_data = ins_is_ldi     ? ins_imm16
+                        : ins_is_data_rd ? blend_pixel
+                        : ins_is_rom_rd  ? t_sp_rdata
+                        : alu_result;
 
-    // ===== writeback =====
-    assign we_rf = exec && cond_ok && write_en && (dst_code < 6'd32);
-    assign wa    = dst_code[4:0];
-    assign wdata = is_ldi        ? imm16
-                 : is_data_read  ? pb_pixel_out
-                 : is_rom_read   ? sp_rd
-                 : alu_res;
+    // ================================================================
+    // System-register writes (SHADOW, LOOP_CNT, LOOP_TGT)
+    // ================================================================
+    logic t_sys_we;
+    assign t_sys_we = ex_do && ins_write && !ins_is_ctrl
+                      && ((ins_dst >= 6'd33 && ins_dst <= 6'd37)
+                       || (ins_dst >= 6'd44));
 
-    // ===== sysreg writes =====
-    logic sys_we;
-    assign sys_we = exec && cond_ok && write_en && !is_ctrl
-                    && ((dst_code >= 6'd33 && dst_code <= 6'd37)
-                     || (dst_code >= 6'd44));
+    assign t_seq_shadow_we    = t_sys_we && (ins_dst == 6'd35);
+    assign t_seq_shadow       = alu_result;
+    assign t_seq_loop_cnt_we  = t_sys_we && (ins_dst == 6'd36);
+    assign t_seq_loop_cnt     = alu_result;
+    assign t_seq_loop_tgt_we  = t_sys_we && (ins_dst == 6'd37);
+    assign t_seq_loop_tgt     = alu_result[11:0];
 
-    assign shadow_we   = sys_we && (dst_code == 6'd35);
-    assign shadow_in   = alu_res;
-    assign loop_cnt_we = sys_we && (dst_code == 6'd36);
-    assign loop_cnt_in = alu_res;
-    assign loop_tgt_we = sys_we && (dst_code == 6'd37);
-    assign loop_tgt_in = alu_res[11:0];
-
-    always_ff @(posedge clk) begin
+    // ================================================================
+    // Flags
+    // ================================================================
+      always_ff @(posedge clk) begin
         if (rst) begin
-            z_r <= 1'b0; n_r <= 1'b0; c_r <= 1'b0; v_r <= 1'b0;
-        end else if (exec && cond_ok && write_en && !is_ctrl &&
-                     dst_code == 6'd33) begin
-            {v_r, c_r, n_r, z_r} <= alu_res[3:0];
-        end else if (exec && f && !is_ctrl && !is_ldi) begin
-            z_r <= alu_z; n_r <= alu_n; c_r <= alu_c; v_r <= alu_v;
+            flag_z_r <= 1'b0; flag_n_r <= 1'b0;
+            flag_c_r <= 1'b0; flag_v_r <= 1'b0;
+        end else if (ex_do && ins_write && !ins_is_ctrl && (ins_dst == 6'd33)) begin
+            {flag_v_r, flag_c_r, flag_n_r, flag_z_r} <= alu_result[3:0];
+        end else if (ex_complete && ins_f && !ins_is_ctrl && !ins_is_ldi) begin
+            flag_z_r <= alu_flag_z; flag_n_r <= alu_flag_n;
+            flag_c_r <= alu_flag_c; flag_v_r <= alu_flag_v;
+        end else if (ex_do && ins_f && !ins_is_ctrl && !ins_is_ldi) begin
+            flag_z_r <= alu_flag_z;
+            flag_n_r <= alu_flag_n;
+            if (alu_upd_cv) begin
+                flag_c_r <= alu_flag_c;
+                flag_v_r <= alu_flag_v;
+            end            
         end
     end
 
-    // ===== special writes =====
+    // ================================================================
+    // Channel / cache / blender control
+    // ================================================================
     always_comb begin
-        pe_ch      = 2'd0;
-        pe_mode_we = 1'b0; pe_mode_in = 3'h0;
-        pe_idxh_we = 1'b0; pe_idxh_in = 3'h0;
-        pe_idx_we  = 1'b0; pe_idx_in  = 16'h0;
-        pe_step_we = 1'b0; pe_step_in = 16'h0;
-        pe_access  = 1'b0;
-        gc_page_we = 1'b0; gc_page_in = 8'h0;
-        gc_flush_en= 1'b0; gc_flush_ch = 2'd0;
-        gc_access  = 1'b0; gc_we = 1'b0; gc_wdata = 16'h0;
-        pb_read    = 1'b0;
+        t_ch          = 2'd0;
+        t_pe_mode_we  = 1'b0; t_pe_mode  = 3'h0;
+        t_pe_idxh_we  = 1'b0; t_pe_idxh  = 3'h0;
+        t_pe_idx_we   = 1'b0; t_pe_idx   = 16'h0;
+        t_pe_step_we  = 1'b0; t_pe_step  = 16'h0;
+        t_pe_access   = 1'b0;
+        t_gc_page_we  = 1'b0; t_gc_page  = 8'h0;
+        t_gc_flush_en = 1'b0; t_gc_flush_ch = 2'd0;
+        t_gc_access   = 1'b0; t_gc_we    = 1'b0; t_gc_wdata = 16'h0;
+        t_blend_read  = 1'b0;
 
-        // GPU_START: configure CH0 from gpu_addr
-        if (gpu_start) begin
-            pe_ch      = 2'd0;
-            pe_mode_we = 1'b1; pe_mode_in = 3'd4;
-            pe_step_we = 1'b1; pe_step_in = 16'h0010;
-            pe_idx_we  = 1'b1; pe_idx_in  = {1'b0, gpu_addr[15:1]};
-            pe_idxh_we = 1'b1; pe_idxh_in = 3'h0;
-            gc_page_we = 1'b1; gc_page_in = gpu_addr[23:16];
-        end else if (run && cond_ok && is_mov && dst_code >= 6'd44) begin
-            pe_ch = dst_code[1:0];
-            if (dst_code < 6'd48) begin
-                gc_access = 1'b1; gc_we = 1'b1; gc_wdata = alu_res;
-            end else if (dst_code < 6'd52) begin
-                pe_idx_we = 1'b1; pe_idx_in = alu_res;
-            end else if (dst_code < 6'd56) begin
-                pe_idxh_we = 1'b1; pe_idxh_in = alu_res[2:0];
-            end else if (dst_code < 6'd60) begin
-                pe_step_we = 1'b1; pe_step_in = alu_res;
-            end else begin
-                pe_mode_we = 1'b1; pe_mode_in = alu_res[10:8];
-                gc_page_we = 1'b1; gc_page_in = alu_res[7:0];
+        // host START: configure channel 0 as a 16 bpp word stream
+        if (gpu_start_i) begin
+            t_ch         = 2'd0;
+            t_pe_mode_we = 1'b1; t_pe_mode = 3'd4;
+            t_pe_step_we = 1'b1; t_pe_step = 16'h0010;
+            t_pe_idx_we  = 1'b1; t_pe_idx  = {1'b0, gpu_addr_i[15:1]};
+            t_pe_idxh_we = 1'b1; t_pe_idxh = 3'h0;
+            t_gc_page_we = 1'b1; t_gc_page = gpu_addr_i[23:16];
+        end else if (ex_issue_do && ins_is_mov && ins_dst >= 6'd44) begin
+            t_ch = ins_dst[1:0];
+            if (ins_dst < 6'd48) begin                 // DATA write
+                t_gc_access = 1'b1; t_gc_we = 1'b1; t_gc_wdata = alu_result;
+            end else if (ins_dst < 6'd52) begin        // IDX
+                t_pe_idx_we = 1'b1; t_pe_idx = alu_result;
+            end else if (ins_dst < 6'd56) begin        // IDXH
+                t_pe_idxh_we = 1'b1; t_pe_idxh = alu_result[2:0];
+            end else if (ins_dst < 6'd60) begin        // STEP
+                t_pe_step_we = 1'b1; t_pe_step = alu_result;
+            end else begin                             // MODE_PAGE
+                t_pe_mode_we = 1'b1; t_pe_mode = alu_result[10:8];
+                t_gc_page_we = 1'b1; t_gc_page = alu_result[7:0];
             end
         end
 
-        if (run && cond_ok && is_data_read) begin
-            pe_ch     = src[1:0];
-            gc_access = 1'b1;
-            gc_we     = 1'b0;
-            pe_access = 1'b1;
-            pb_read   = 1'b1;
+        // DATA read
+        if (ex_issue_do && ins_is_data_rd) begin
+            t_ch         = ins_src[1:0];
+            t_gc_access  = 1'b1;
+            t_gc_we      = 1'b0;
+            t_pe_access  = 1'b1;
+            t_blend_read = 1'b1;
         end
 
-        if (run && cond_ok && is_flush) begin
-            gc_flush_en = 1'b1;
-            gc_flush_ch = imm12_ctrl[1:0];
+        // FLUSH
+        if (ex_issue_do && ins_is_flush) begin
+            t_gc_flush_en = 1'b1;
+            t_gc_flush_ch = ins_addr[1:0];
         end
     end
 
