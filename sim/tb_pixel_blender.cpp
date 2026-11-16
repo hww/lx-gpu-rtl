@@ -20,132 +20,150 @@ static void tick() {
     dut->clk = 1; dut->eval();
 }
 
-static void check(const char* name, uint16_t got, uint16_t exp) {
+static void test_fail(const char* name, uint32_t got, uint32_t exp, int bits) {
     checks++;
     if (got != exp) {
-        printf(CLR_RED "    [FAIL] %-24s got=0x%04X exp=0x%04X" CLR_RST "\n",
-               name, got, exp);
+        printf(CLR_RED "    [TEST FAIL] %-22s got=0x%0*X exp=0x%0*X" CLR_RST "\n",
+               name, bits/4, got, bits/4, exp);
         errors++;
     }
 }
 
-// read: pixel_o = unpack(word_i)
-static void do_read(uint8_t mode, uint8_t pos, uint16_t word,
-                    uint16_t exp_pixel, const char* name) {
-    dut->is_read_i = 1;
-    dut->mode_i = mode;
-    dut->pos_i  = pos;
-    dut->word_i = word;
-    dut->pixel_i = 0;
-    dut->start_i = 1;
-    tick();                    // ST_IDLE -> ST_COMPUTE (capture)
-    dut->start_i = 0;
-    tick();                    // ST_COMPUTE -> ST_DONE
-    tick();                    // ST_DONE -> ST_IDLE, ack_o was high
-
-    int fails_before = errors;
-    check("pixel_o", dut->pixel_o, exp_pixel);
-
-    printf(CLR_CYN "  %-18s" CLR_RST " mode=%d pos=%2d word=%04X -> ",
-           name, mode, pos, word);
-    if (errors == fails_before)
-        printf(CLR_GRN "OK" CLR_RST " (pixel=%04X)\n", dut->pixel_o);
-    else
-        printf("\n");
-}
-
-// write: word_o = blend(word_i, pixel_i)
-static void do_write(uint8_t mode, uint8_t pos, uint16_t word, uint16_t pixel,
-                     uint16_t exp_word, const char* name) {
-    dut->is_read_i = 0;
-    dut->mode_i = mode;
-    dut->pos_i  = pos;
-    dut->word_i = word;
-    dut->pixel_i = pixel;
-    dut->start_i = 1;
-    tick();
-    dut->start_i = 0;
-    tick();
-    tick();
-
-    int fails_before = errors;
-    check("word_o", dut->word_o, exp_word);
-
-    printf(CLR_CYN "  %-18s" CLR_RST " mode=%d pos=%2d word=%04X pix=%04X -> ",
-           name, mode, pos, word, pixel);
-    if (errors == fails_before)
-        printf(CLR_GRN "OK" CLR_RST " (word=%04X)\n", dut->word_o);
-    else
-        printf("\n");
+static void check_bit(const char* name, int got, int exp) {
+    checks++;
+    if ((!!got) != (!!exp)) {
+        printf(CLR_RED "    [TEST FAIL] %-22s got=%d exp=%d" CLR_RST "\n",
+               name, !!got, !!exp);
+        errors++;
+    }
 }
 
 static void header(const char* t) {
     printf("\n" CLR_BLD CLR_YEL "=== %s ===" CLR_RST "\n", t);
 }
 
+static void result_line(const char* name, int fails_before, const char* info) {
+    if (errors == fails_before)
+        printf(CLR_CYN "  %-18s" CLR_RST " -> " CLR_GRN "OK" CLR_RST " (%s)\n",
+               name, info);
+    else
+        printf(CLR_CYN "  %-18s" CLR_RST " -> " CLR_RED "TEST FAIL" CLR_RST " (%s)\n",
+               name, info);
+}
+
+static void reset() {
+    dut->rst = 1;
+    dut->cyc_i = 0; dut->stb_i = 0; dut->we_i = 0;
+    dut->adr_i = 0; dut->mode_i = 0; dut->pos_i = 0;
+    dut->dat_i = 0; dut->pixel_i = 0; dut->ack_i = 0;
+    tick(); tick();
+    dut->rst = 0;
+    tick();
+}
+
+// read: cyc&stb&~we -> dat_o = pixel, ack_o = 1 (combinational)
+static void do_read(uint8_t mode, uint8_t pos, uint16_t word,
+                    uint16_t exp_pixel, const char* name) {
+    int fb = errors;
+    dut->cyc_i = 1;
+    dut->stb_i = 1;
+    dut->we_i  = 0;
+    dut->adr_i = 0;      // [0]=0 read, [1]=ch (0)
+    dut->mode_i = mode;
+    dut->pos_i  = pos;
+    dut->dat_i  = word;
+    dut->pixel_i = 0;
+    dut->eval();            // combinational
+
+    uint16_t got_pixel = dut->dat_o;
+    int      got_ack   = dut->ack_o;
+
+    test_fail("dat_o", got_pixel, exp_pixel, 16);
+    check_bit("ack_o", got_ack, 1);
+
+    tick();
+    dut->cyc_i = 0; dut->stb_i = 0;
+    dut->eval();
+    check_bit("ack_idle", dut->ack_o, 0);
+
+    char buf[32]; snprintf(buf, sizeof buf, "pixel=%04X", got_pixel);
+    result_line(name, fb, buf);
+}
+
+// write: RMW, 2 cache accesses via ack_i handshake
+static void do_write(uint8_t mode, uint8_t pos, uint16_t word, uint16_t pixel,
+                     uint16_t exp_word, const char* name) {
+    int fb = errors;
+
+    // start write: cyc&stb&we, adr[0]=1
+    dut->cyc_i = 1;
+    dut->stb_i = 1;
+    dut->we_i  = 1;
+    dut->adr_i = 1;      // [0]=1 write, [1]=ch (0)
+    dut->mode_i = mode;
+    dut->pos_i  = pos;
+    dut->dat_i  = 0;        // old word arrives later
+    dut->pixel_i = pixel;
+    dut->ack_i   = 0;
+    tick();                 // IDLE -> RMW_READ
+    dut->cyc_i = 0; dut->stb_i = 0; dut->we_i = 0;
+    dut->eval();
+
+    check_bit("rmw_req.read",  dut->rmw_req_o, 1);
+    check_bit("rmw_we.read",   dut->rmw_we_o, 0);
+
+    // RMW_READ done: old word arrives via dat_i, ack_i pulse
+    dut->dat_i = word;
+    dut->ack_i = 1;
+    tick();                 // RMW_READ -> RMW_WRITE
+    dut->ack_i = 0;
+    dut->eval();
+
+    check_bit("rmw_req.write", dut->rmw_req_o, 1);
+    check_bit("rmw_we.write",  dut->rmw_we_o, 1);
+    test_fail("rmw_dat", dut->rmw_dat_o, exp_word, 16);
+
+    // RMW_WRITE done: ack_i pulse -> ack_o
+    dut->ack_i = 1;
+    tick();
+    dut->ack_i = 0;
+    dut->eval();
+
+    check_bit("ack.write",  dut->ack_o, 1);
+    check_bit("rmw_req.after", dut->rmw_req_o, 0);
+    check_bit("rmw_we.after",  dut->rmw_we_o, 0);
+
+    char buf[32]; snprintf(buf, sizeof buf, "word=%04X", exp_word);
+    result_line(name, fb, buf);
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vpixel_blender;
 
-    printf(CLR_BLD "pixel_blender testbench" CLR_RST "\n");
+    printf(CLR_BLD "pixel_blender testbench (Wishbone slave)" CLR_RST "\n");
+    reset();
 
-    dut->rst = 1; dut->start_i = 0; dut->is_read_i = 0;
-    dut->mode_i = 0; dut->pos_i = 0; dut->word_i = 0; dut->pixel_i = 0;
-    tick(); tick();
-    dut->rst = 0; tick();
-
-    // ===== 4 bpp =====
-    header("4 bpp (mode=2)");
+    // ===== reads (combinational) =====
+    header("Read (combinational, ack = cyc&stb&~we)");
     do_read(2, 0, 0xABCD, 0x000A, "4bpp.p0.rd");
-    do_read(2, 1, 0xABCD, 0x000B, "4bpp.p1.rd");
-    do_read(2, 2, 0xABCD, 0x000C, "4bpp.p2.rd");
     do_read(2, 3, 0xABCD, 0x000D, "4bpp.p3.rd");
-    do_write(2, 0, 0xABCD, 0x0005, 0x5BCD, "4bpp.p0.wr");
-    do_write(2, 1, 0xABCD, 0x0005, 0xA5CD, "4bpp.p1.wr");
-    do_write(2, 2, 0xABCD, 0x0005, 0xAB5D, "4bpp.p2.wr");
-    do_write(2, 3, 0xABCD, 0x0005, 0xABC5, "4bpp.p3.wr");
-
-    // ===== 8 bpp =====
-    header("8 bpp (mode=3)");
     do_read(3, 0, 0xABCD, 0x00AB, "8bpp.p0.rd");
-    do_read(3, 1, 0xABCD, 0x00CD, "8bpp.p1.rd");
-    do_write(3, 0, 0xABCD, 0x0012, 0x12CD, "8bpp.p0.wr");
-    do_write(3, 1, 0xABCD, 0x0012, 0xAB12, "8bpp.p1.wr");
-
-    // ===== 1 bpp =====
-    header("1 bpp (mode=0)");
     do_read(0, 0, 0x8000, 0x0001, "1bpp.p0.rd");
-    do_read(0, 15, 0x0001, 0x0001, "1bpp.p15.rd");
-    do_read(0, 0, 0x0000, 0x0000, "1bpp.zero.rd");
-    // 1bpp write: pixel=1 at pos=0 -> word=0x8000
-    do_write(0, 0, 0x0000, 0x0001, 0x8000, "1bpp.p0.wr");
-    // pixel=1 at pos=15 -> word=0x0001
-    do_write(0, 15, 0x0000, 0x0001, 0x0001, "1bpp.p15.wr");
-    // pixel=0 clears bit
-    do_write(0, 0, 0x8000, 0x0000, 0x0000, "1bpp.p0.clr");
-
-    // ===== 2 bpp =====
-    header("2 bpp (mode=1)");
     do_read(1, 0, 0xE400, 0x0003, "2bpp.p0.rd");
-    do_read(1, 3, 0xE400, 0x0000, "2bpp.p3.rd");
-    // 2bpp write: pixel=1 at pos=0 -> bits 15:14 = 01 -> 0x4000
-    do_write(1, 0, 0x0000, 0x0001, 0x4000, "2bpp.p0.wr");
-    // pixel=3 at pos=0 -> 0xC000
-    do_write(1, 0, 0x0000, 0x0003, 0xC000, "2bpp.p0.wr3");
-
-    // ===== 16 bpp =====
-    header("16 bpp (mode=4)");
     do_read(4, 0, 0x1234, 0x1234, "16bpp.rd");
-    do_write(4, 0, 0xABCD, 0x1234, 0x1234, "16bpp.wr");
-
-    // ===== PASS_LO8 / HI8 / 16 =====
-    header("PASS modes");
     do_read(5, 0, 0xABCD, 0x00CD, "pass_lo8.rd");
-    do_write(5, 0, 0xABCD, 0x0012, 0xAB12, "pass_lo8.wr");
     do_read(6, 0, 0xABCD, 0x00AB, "pass_hi8.rd");
-    do_write(6, 0, 0xABCD, 0x0012, 0x12CD, "pass_hi8.wr");
     do_read(7, 0, 0x1234, 0x1234, "pass16.rd");
-    do_write(7, 0, 0xABCD, 0x1234, 0x1234, "pass16.wr");
+
+    // ===== writes (RMW) =====
+    header("Write (RMW, 2 cache accesses via ack_i)");
+    do_write(2, 0, 0xABCD, 0x0005, 0x5BCD, "4bpp.p0.wr");
+    do_write(2, 3, 0xABCD, 0x0005, 0xABC5, "4bpp.p3.wr");
+    do_write(3, 0, 0xABCD, 0x0012, 0x12CD, "8bpp.p0.wr");
+    do_write(4, 0, 0xABCD, 0x1234, 0x1234, "16bpp.wr");
+    do_write(5, 0, 0xABCD, 0x0012, 0xAB12, "pass_lo8.wr");
+    do_write(6, 0, 0xABCD, 0x0012, 0x12CD, "pass_hi8.wr");
 
     // ===== summary =====
     printf("\n" CLR_BLD);

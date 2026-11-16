@@ -28,8 +28,8 @@ module regfile (
     input  logic [15:0] wr_data_i
 );
 
-    (* ram_style = "block", no_rw_check *) logic [15:0] mem_a [0:31];
-    (* ram_style = "block", no_rw_check *) logic [15:0] mem_b [0:31];
+    (* ram_style = "block", no_rw_check *) logic [15:0] mem_a [0:31] /*verilator public_flat*/;
+    (* ram_style = "block", no_rw_check *) logic [15:0] mem_b [0:31] /*verilator public_flat*/;
 
     logic [15:0] q_a, q_b;
     logic        byp_a, byp_b;

@@ -41,7 +41,7 @@
 // ex_ack: an instruction completes when ex_ack = 1:
 //   DATA read  -> blend_ack
 //   ROM read   -> t_rom_wait_r (1 cycle, BRAM access port)
-//   DATA write -> gc_access_done
+//   DATA write -> gc_ack
 //   others     -> 1
 module top (
     input  logic        clk,
@@ -64,7 +64,9 @@ module top (
     output logic [23:0] wb_adr_o,
     output logic [15:0] wb_dat_o,
     input  logic [15:0] wb_dat_i,
-    input  logic        wb_ack_i
+    input  logic        wb_ack_i,
+
+    output logic dbg_blend_ack_o
 );
 
     // ================================================================
@@ -72,7 +74,7 @@ module top (
     // ================================================================
 
     // ---- microcode ROM ----
-    logic [31:0] rom_fetch_data;
+   logic [31:0] rom_fetch_data /*verilator public*/ ;  
     logic [31:0] rom_acc_rdata;
     logic        t_rom_acc_we, t_rom_acc_re;
     logic [31:0] t_rom_acc_wdata;
@@ -153,7 +155,7 @@ module top (
     logic [7:0]  t_gc_page;
     logic        t_gc_flush_en;
     logic [1:0]  t_gc_flush_ch;
-    logic        gc_hit, gc_access_done, gc_flush_done, gc_error;
+    logic        gc_hit, gc_ack, gc_flush_done, gc_error;
     logic [15:0] gc_rdata;
     logic [7:0]  gc_page;
     logic [23:0] gc_addr24;
@@ -161,11 +163,14 @@ module top (
     logic [23:0] gc_wb_adr;
     logic [15:0] gc_wb_dat;
 
-    // ---- pixel blender ----
-    logic        t_blend_read;
-    logic [15:0] t_pixel_r;
-    logic [15:0] blend_pixel, blend_word;
-    logic        blend_ack, blend_busy;
+    // ---- pixel blender (Wishbone slave) ----
+    logic        blend_cyc, blend_stb, blend_we;
+    logic [2:0]  blend_adr;
+    logic        access_pending_r;   
+    logic [15:0] blend_dat_i, blend_dat_o;
+    logic        blend_ack;
+    logic        blend_rmw_req, blend_rmw_we;
+    logic [15:0] blend_rmw_dat;
 
     // ---- special-operand read ----
     logic [15:0] t_sp_rdata;
@@ -226,15 +231,15 @@ module top (
 
     assign ex_complete = ex_ack && !seq_skip && !seq_halted && !seq_error;
     // ex_issue does not depend on ex_ack: it breaks the loop
-    // ex_ack <-> ex_complete <-> gc_access_done
+    // ex_ack <-> ex_complete <-> gc_ack
     assign ex_issue    = !seq_skip && !seq_halted && !seq_error;
     assign ex_do       = ex_complete && cond_ok;
     assign ex_issue_do = ex_issue && cond_ok;
 
-    assign ex_ack = ins_is_data_rd ? blend_ack
-                  : ins_is_rom_rd  ? t_rom_wait_r
-                  : ins_is_data_wr ? gc_access_done
-                  : 1'b1;
+    assign ex_ack = ins_is_data_rd ? gc_ack
+                : ins_is_rom_rd  ? t_rom_wait_r
+                : ins_is_data_wr ? gc_ack
+                : 1'b1;
 
     // ================================================================
     // Blocks
@@ -300,7 +305,7 @@ module top (
         .idx_we_i(t_pe_idx_we),   .idx_i(t_pe_idx),
         .step_we_i(t_pe_step_we), .step_i(t_pe_step),
         .access_i(t_pe_access),
-        .access_done_i(blend_ack),
+        .access_done_i(gc_ack),
         .word_o(pe_word), .pos_o(pe_pos), .mode_o(pe_mode),
         .prefetch_o(pe_prefetch)
     );
@@ -312,7 +317,7 @@ module top (
         .access_i(t_gc_access),
         .prefetch_i(pe_prefetch),
         .we_i(t_gc_we), .wdata_i(t_gc_wdata),
-        .hit_o(gc_hit), .rdata_o(gc_rdata), .access_done_o(gc_access_done),
+        .hit_o(gc_hit), .rdata_o(gc_rdata), .ack_o(gc_ack),
         .page_we_i(t_gc_page_we), .page_i(t_gc_page), .page_o(gc_page),
         .flush_en_i(t_gc_flush_en), .flush_ch_i(t_gc_flush_ch),
         .flush_done_o(gc_flush_done),
@@ -324,18 +329,14 @@ module top (
 
     pixel_blender u_blend (
         .clk(clk), .rst(rst),
-        .start_i(gc_access_done),
-        .is_read_i(t_blend_read), .mode_i(pe_mode), .pos_i(pe_pos),
-        .word_i(gc_rdata), .pixel_i(t_pixel_r),
-        .pixel_o(blend_pixel), .word_o(blend_word),
-        .ack_o(blend_ack), .busy_o(blend_busy)
+        .cyc_i(blend_cyc), .stb_i(blend_stb), .we_i(blend_we),
+        .adr_i(blend_adr), .mode_i(pe_mode), .pos_i(pe_pos),
+        .dat_i(gc_rdata), .pixel_i(alu_result),
+        .dat_o(blend_dat_o), .ack_o(blend_ack),
+        .ack_i(gc_ack),
+        .rmw_req_o(blend_rmw_req), .rmw_we_o(blend_rmw_we),
+        .rmw_dat_o(blend_rmw_dat)
     );
-
-    // pixel to be written, captured when the write access starts
-    always_ff @(posedge clk) begin
-        if (rst)                         t_pixel_r <= 16'h0;
-        else if (t_gc_access && t_gc_we) t_pixel_r <= alu_result;
-    end
 
     // ================================================================
     // Outputs
@@ -360,7 +361,7 @@ module top (
             6'd32: t_sp_rdata = 16'h0;
             6'd33: t_sp_rdata = {12'h0, flag_v_r, flag_c_r, flag_n_r, flag_z_r};
             6'd34: t_sp_rdata = {12'h0, gc_wb_cyc, gc_flush_done,
-                                 gc_access_done, gc_hit};
+                                 gc_ack, gc_hit};
             6'd35: t_sp_rdata = seq_shadow;
             6'd36: t_sp_rdata = seq_loop_cnt;
             6'd37: t_sp_rdata = {4'h0, seq_loop_tgt};
@@ -368,7 +369,7 @@ module top (
             6'd39: t_sp_rdata = rom_acc_rdata[31:16];
             6'd40: t_sp_rdata = 16'h0;
             6'd41: t_sp_rdata = t_mhi_r;
-            6'd44, 6'd45, 6'd46, 6'd47: t_sp_rdata = blend_pixel;
+            6'd44, 6'd45, 6'd46, 6'd47: t_sp_rdata = blend_dat_o;
             default: t_sp_rdata = 16'h0;
         endcase
     end
@@ -433,7 +434,7 @@ module top (
     assign t_rf_wr_en   = ex_do && ins_write && (ins_dst < 6'd32);
     assign t_rf_wr_addr = ins_dst[4:0];
     assign t_rf_wr_data = ins_is_ldi     ? ins_imm16
-                        : ins_is_data_rd ? blend_pixel
+                        : ins_is_data_rd ? blend_dat_o
                         : ins_is_rom_rd  ? t_sp_rdata
                         : alu_result;
 
@@ -475,7 +476,7 @@ module top (
     end
 
     // ================================================================
-    // Channel / cache / blender control
+    // Channel / cache control (combinational, no self-dependency)
     // ================================================================
     always_comb begin
         t_ch          = 2'd0;
@@ -487,7 +488,6 @@ module top (
         t_gc_page_we  = 1'b0; t_gc_page  = 8'h0;
         t_gc_flush_en = 1'b0; t_gc_flush_ch = 2'd0;
         t_gc_access   = 1'b0; t_gc_we    = 1'b0; t_gc_wdata = 16'h0;
-        t_blend_read  = 1'b0;
 
         // host START: configure channel 0 as a 16 bpp word stream
         if (gpu_start_i) begin
@@ -499,8 +499,8 @@ module top (
             t_gc_page_we = 1'b1; t_gc_page = gpu_addr_i[23:16];
         end else if (ex_issue_do && ins_is_mov && ins_dst >= 6'd44) begin
             t_ch = ins_dst[1:0];
-            if (ins_dst < 6'd48) begin                 // DATA write
-                t_gc_access = 1'b1; t_gc_we = 1'b1; t_gc_wdata = alu_result;
+            if (ins_dst < 6'd48) begin                 // DATA write (RMW)
+                // RMW через blend (см. always_ff ниже)
             end else if (ins_dst < 6'd52) begin        // IDX
                 t_pe_idx_we = 1'b1; t_pe_idx = alu_result;
             end else if (ins_dst < 6'd56) begin        // IDXH
@@ -513,13 +513,12 @@ module top (
             end
         end
 
-        // DATA read
-        if (ex_issue_do && ins_is_data_rd) begin
-            t_ch         = ins_src[1:0];
+        // DATA read: держим доступ, пока blender не ответил ack
+        if (blend_cyc && !blend_ack) begin
+            t_ch         = blend_adr[1:0];
             t_gc_access  = 1'b1;
             t_gc_we      = 1'b0;
             t_pe_access  = 1'b1;
-            t_blend_read = 1'b1;
         end
 
         // FLUSH
@@ -527,6 +526,54 @@ module top (
             t_gc_flush_en = 1'b1;
             t_gc_flush_ch = ins_addr[1:0];
         end
+
+        // RMW: blender requests a cache access
+        if (blend_rmw_req) begin
+            t_ch        = blend_adr[1:0];
+            t_gc_access = 1'b1;
+            t_gc_we     = blend_rmw_we;
+            t_gc_wdata  = blend_rmw_dat;
+        end
     end
+
+    // ================================================================
+    // Blender request FSM (registers — no combinational loop)
+    // ================================================================
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            blend_cyc <= 1'b0;
+            blend_stb <= 1'b0;
+            blend_we  <= 1'b0;
+            blend_adr <= 3'd0;
+            access_pending_r <= 1'b0;
+        end else begin
+            // старт нового DATA read (только если не pending)
+            if (ex_issue_do && ins_is_data_rd && !access_pending_r) begin
+                blend_cyc <= 1'b1;
+                blend_stb <= 1'b1;
+                blend_we  <= 1'b0;
+                blend_adr <= {ins_src[1:0], 1'b0};
+                access_pending_r <= 1'b1;
+            end
+            // blender ответил — снимаем cyc, но pending остаётся до pc++
+            else if (blend_cyc && blend_ack) begin
+                blend_cyc <= 1'b0;
+                blend_stb <= 1'b0;
+            end
+            // pc сдвинулся (ex_ack = 1) — снимаем pending
+            if (ex_ack && access_pending_r) begin
+                access_pending_r <= 1'b0;
+            end
+            // RMW (write)
+            if (blend_rmw_req) begin
+                blend_cyc <= 1'b1;
+                blend_stb <= 1'b1;
+                blend_we  <= blend_rmw_we;
+                blend_adr <= {t_ch, 1'b1};
+            end
+        end
+    end
+
+    assign dbg_blend_ack_o = blend_ack;
 
 endmodule

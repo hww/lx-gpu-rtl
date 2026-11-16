@@ -2,7 +2,7 @@
 `default_nettype none
 
 // gpu_cache: one-word cache entry per channel (CH0..CH3).
-// Wishbone master. access_done_o / flush_done_o are one-cycle strobes.
+// Wishbone master. ack_o / flush_done_o are one-cycle strobes.
 //
 // FSM: ST_IDLE -> ST_FILL      (wb_cyc_o held until wb_ack_i) -> ST_IDLE
 //      ST_IDLE -> ST_WRITEBACK (wb_cyc_o held until wb_ack_i) -> ST_IDLE
@@ -21,7 +21,7 @@ module gpu_cache (
     input  logic [15:0] wdata_i,
     output logic        hit_o,
     output logic [15:0] rdata_o,
-    output logic        access_done_o,
+    output logic        ack_o,
 
     // channel page register (write also invalidates the entry)
     input  logic        page_we_i,
@@ -153,7 +153,7 @@ module gpu_cache (
         endcase
     end
 
-    // ===== access_done_o: one-cycle strobe =====
+    // ===== ack_o: one-cycle strobe =====
     logic fill_done_c;
     logic access_finish_c;
 
@@ -164,7 +164,7 @@ module gpu_cache (
         if (rst) access_done_r <= 1'b0;
         else     access_done_r <= access_finish_c;
     end
-    assign access_done_o = access_done_r;
+    assign ack_o = access_done_r;
 
     // ===== flush_done_o: one-cycle strobe =====
     // flush of an invalid or clean channel needs no bus cycle (no-op flush)
