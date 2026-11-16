@@ -11,7 +11,8 @@ RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_blender.sv rtl/pixel_engine.sv \
        rtl/top.sv rtl/top_fpga.sv
 TOP := top_fpga
 
-.PHONY: all synth pnr bit clean sim-top sim-alu sim-pixel-engine \
+.PHONY: all synth pnr bit clean top stat sprite \
+        sim-top sim-alu sim-pixel-engine \
         sim-pixel-blender sim-gpu-cache sim-channel asm dis
 
 all: bit
@@ -24,30 +25,28 @@ $(BUILD):
 # ================================================================
 asm: tools/asm.cpp tools/asm.h tools/isa.h | $(BUILD)
 	g++ -std=c++17 -O2 -I tools -o $(BUILD)/asm tools/asm.cpp
-	@echo "built $(BUILD)/asm"
 
 dis: tools/dis.cpp tools/disasm.h tools/isa.h | $(BUILD)
 	g++ -std=c++17 -O2 -I tools -o $(BUILD)/dis tools/dis.cpp
-	@echo "built $(BUILD)/dis"
 
 # ================================================================
 # sim-top: Vtop, без tb_top_wrapper
 # ================================================================
-sim-top: | $(BUILD)
+top: asm $(wildcard tools/*.h) | $(BUILD)
 	mkdir -p $(BUILD)/sim_top
 	verilator --cc --exe --build -j 1 \
-	    -DSIMULATION \
-	    -I$(CURDIR)/tools \
-	    -I$(CURDIR)/third_party/stb \
-	    -I$(CURDIR)/sim \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE -Wno-UNOPTFLAT \
-	    --trace \
-	    --top-module top \
-	    -Mdir $(CURDIR)/$(BUILD)/sim_top \
-	    rtl/alu.sv rtl/regfile.sv rtl/sequencer.sv rtl/microcode_rom.sv \
-	    rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/top.sv \
-	    $(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
-	./$(BUILD)/sim_top/Vtop -s1 sim/test_sprite.pkg -gpuaddr 0
+		-DSIMULATION \
+		-CFLAGS "-I$(CURDIR)/tools -I$(CURDIR)/third_party/stb -I$(CURDIR)/sim" \
+		-Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE -Wno-UNOPTFLAT \
+		--trace \
+		--top-module top \
+		-Mdir $(CURDIR)/$(BUILD)/sim_top \
+		rtl/alu.sv rtl/regfile.sv rtl/sequencer.sv rtl/microcode_rom.sv \
+		rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/top.sv \
+		$(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
+
+sim-top: top
+	./$(BUILD)/sim_top/Vtop -prog sim/test_sprite.asm -gpuaddr 32
 
 # ---- остальные sim-* (модульные тесты) ----
 sim-alu: | $(BUILD)
@@ -99,11 +98,19 @@ sim-channel: | $(BUILD)
 # ================================================================
 # synth / pnr / bit (без asm/pack)
 # ================================================================
+# Плоская статистика (для оценки всей FPGA)
 synth: | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/synth.log -p \
-	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -abc9 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
+	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
 	@echo "=== flat stat ==="
-	@sed -n '/Number of cells/,/^$$/p' $(BUILD)/stat_flat.txt
+	@cat $(BUILD)/stat_flat.txt
+
+# Иерархическая статистика (для понимания, где что тратится)
+stat: | $(BUILD)
+	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p \
+	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
+	@echo "=== hierarchical stat ==="
+	@cat $(BUILD)/stat_hier.txt
 
 pnr: synth
 	$(NEXTPNR) --$(DEVICE) --speed 6 --package $(PACKAGE) \
@@ -114,3 +121,10 @@ bit: pnr
 
 clean:
 	rm -rf $(BUILD)
+
+sprite: top
+	./$(BUILD)/sim_top/Vtop \
+	    -v \
+		-prog sim/test_sprite.asm -gpuaddr 32 \
+		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0200 \
+		-out images/output.png

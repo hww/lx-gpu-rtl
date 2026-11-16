@@ -6,7 +6,7 @@
 // Naming:
 //   *_i / *_o        ports of top
 //   u_<blk>          instance of block <blk>; wires it drives are <blk>_<port>
-//   ins_*            fields decoded from the instruction word (rom_fetch_data)
+//   ins_*            fields decoded from the held ROM fetch word
 //   flag_*_r         Z N C V registers
 //   ex_*             execute control
 //   t_*              other signals produced by top; t_<blk>_<port> drives <blk>.<port>
@@ -38,11 +38,11 @@
 //   MOV Rd, ROML  -> read low 16 (no increment)
 //   MOV Rd, ROMH  -> read high 16, ROMA++
 //
-// ex_ack: an instruction completes when ex_ack = 1:
-//   DATA read  -> blend_ack
-//   ROM read   -> t_rom_wait_r (1 cycle, BRAM access port)
-//   DATA write -> gc_ack
-//   others     -> 1
+// ex_ack: the sequencer may commit only after the active device responds:
+//   DATA read/write -> blend_ack (CPU <-> blender)
+//   ROM read        -> registered ROM access-port response
+//   FLUSH           -> gc_flush_done
+//   other ops       -> 1
 module top (
     input  logic        clk,
     input  logic        rst,
@@ -74,13 +74,14 @@ module top (
     // ================================================================
 
     // ---- microcode ROM ----
-   logic [31:0] rom_fetch_data /*verilator public*/ ;  
+    logic [31:0] rom_fetch_data /*verilator public*/;
     logic [31:0] rom_acc_rdata;
     logic        t_rom_acc_we, t_rom_acc_re;
     logic [31:0] t_rom_acc_wdata;
     logic [11:0] t_roma_r;
     logic [15:0] t_roml_r;
-    logic        t_rom_wait_r;
+    logic        rom_rd_pending_r, rom_rd_ready_r;
+    logic        rom_rd_issue;
 
     // ---- instruction fields ----
     logic        ins_l;
@@ -167,8 +168,13 @@ module top (
     logic        blend_cyc, blend_stb, blend_we;
     logic [2:0]  blend_adr;
     logic        access_pending_r;   
-    logic [15:0] blend_dat_i, blend_dat_o;
+    logic [15:0] blend_dat_o;
     logic        blend_ack;
+    logic        blend_gc_ack_r;
+    logic        pe_access_done;
+    logic        blend_read_done_r;
+    logic        blend_rmw_done_r;
+    logic        blend_rmw_we_d;
     logic        blend_rmw_req, blend_rmw_we;
     logic [15:0] blend_rmw_dat;
 
@@ -176,38 +182,38 @@ module top (
     logic [15:0] t_sp_rdata;
 
     // ================================================================
-    // Instruction decode
-    // NOTE: field positions below are the OLD layout (DST [28:23], WRITE 22,
-    // COND [21:18], F 17). The accepted layout is COND [28:25], WRITE 24,
-    // F 23, DST [22:17]. Update this block together with the assembler.
-    // ================================================================
-    assign ins_l       = rom_fetch_data[31];
-    assign ins_class   = {rom_fetch_data[30], rom_fetch_data[29]};
-    assign ins_cond    = rom_fetch_data[28:25];
-    assign ins_write   = rom_fetch_data[24];
-    assign ins_f       = rom_fetch_data[23];
-    assign ins_dst     = rom_fetch_data[22:17];
-    assign ins_alu_op  = rom_fetch_data[16:12];
-    assign ins_r       = rom_fetch_data[16];
-    assign ins_ctrl_op = rom_fetch_data[15:12];
-    assign ins_imm16   = rom_fetch_data[15:0];
-    assign ins_src     = rom_fetch_data[11:6];
-    assign ins_sx      = rom_fetch_data[11];
-    assign ins_imm11   = rom_fetch_data[10:0];
-    assign ins_addr    = rom_fetch_data[11:0];
+    // Instruction decode. ROM output is registered; TOP_DECODE provides
+    // the synchronous register file with one full cycle to read operands.
+    assign ins_word = (top_state_r == TOP_EXEC && seq_skip)
+                    ? 32'h0000_0000 : rom_fetch_data;
 
-    assign ins_is_ldi  = (ins_class == 2'b01);
-    assign ins_is_ctrl = (ins_class == 2'b10);
-    assign ins_is_mov  = (ins_alu_op == 5'd0) && !ins_is_ctrl && !ins_is_ldi;
+    assign ins_l       = ins_word[31];
+    assign ins_class   = {ins_word[30], ins_word[29]};
+    assign ins_cond    = ins_word[28:25];
+    assign ins_write   = ins_word[24];
+    assign ins_f       = ins_word[23];
+    assign ins_dst     = ins_word[22:17];
+    assign ins_alu_op  = ins_word[16:12];
+    assign ins_r       = ins_word[16];
+    assign ins_ctrl_op = ins_word[15:12];
+    assign ins_imm16   = ins_word[15:0];
+    assign ins_src     = ins_word[11:6];
+    assign ins_sx      = ins_word[11];
+    assign ins_imm11   = ins_word[10:0];
+    assign ins_addr    = ins_word[11:0];
+
+    assign ins_is_ldi   = (ins_class == 2'b01);
+    assign ins_is_ctrl  = (ins_class == 2'b10);
+    assign ins_is_mov   = (ins_alu_op == 5'd0) && !ins_is_ctrl && !ins_is_ldi;
     assign ins_is_flush = ins_is_ctrl && ({ins_r, ins_ctrl_op} == 5'd6);
+    assign ins_is_data_rd = !ins_is_ctrl &&
+                            (ins_src >= 6'd44 && ins_src < 6'd48);
+    assign ins_is_rom_rd  = !ins_is_ctrl &&
+                            (ins_src == 6'd38 || ins_src == 6'd39);
+    assign ins_is_data_wr = ins_is_mov &&
+                            (ins_dst >= 6'd44 && ins_dst < 6'd48);
 
-    assign ins_is_data_rd = !ins_is_ctrl && (ins_src >= 6'd44 && ins_src < 6'd48);
-    assign ins_is_rom_rd  = !ins_is_ctrl && (ins_src == 6'd38 || ins_src == 6'd39);
-    assign ins_is_data_wr = ins_is_mov && (ins_dst >= 6'd44 && ins_dst < 6'd48);
-
-    // ================================================================
-    // Condition and execute control
-    // ================================================================
+    // Condition evaluation.
     always_comb begin
         case (ins_cond)
             4'd0:    cond_ok = 1'b1;
@@ -229,25 +235,97 @@ module top (
         endcase
     end
 
-    assign ex_complete = ex_ack && !seq_skip && !seq_halted && !seq_error;
-    // ex_issue does not depend on ex_ack: it breaks the loop
-    // ex_ack <-> ex_complete <-> gc_ack
-    assign ex_issue    = !seq_skip && !seq_halted && !seq_error;
-    assign ex_do       = ex_complete && cond_ok;
+    assign ex_issue    = (top_state_r == TOP_EXEC) &&
+                         !seq_skip && !seq_halted && !seq_error;
     assign ex_issue_do = ex_issue && cond_ok;
+    assign ex_ack      = !cond_ok ? 1'b1 :
+                         ins_is_data_rd ? blend_ack :
+                         ins_is_data_wr ? blend_ack :
+                         ins_is_rom_rd  ? rom_rd_ready_r :
+                         ins_is_flush   ? gc_flush_done : 1'b1;
+    assign ex_complete = seq_commit;
+    assign ex_do       = ex_complete && cond_ok;
 
-    assign ex_ack = ins_is_data_rd ? gc_ack
-                : ins_is_rom_rd  ? t_rom_wait_r
-                : ins_is_data_wr ? gc_ack
-                : 1'b1;
+    // One-shot synchronous read from the ROM access port.
+    assign rom_rd_issue = ex_issue_do && ins_is_rom_rd &&
+                          !rom_rd_pending_r && !rom_rd_ready_r;
 
-    // ================================================================
+    assign rom_fetch_en = (top_state_r == TOP_FETCH);
+
+    // Fetch -> decode -> execute. PC changes only on a committed instruction.
+    // A branch bubble is consumed without discarding the fetched target word.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            top_state_r <= TOP_IDLE;
+        end else if (gpu_reset_i) begin
+            top_state_r <= TOP_IDLE;
+        end else if (t_seq_start) begin
+            top_state_r <= TOP_FETCH;
+        end else begin
+            case (top_state_r)
+                TOP_IDLE: begin
+                    // Wait for START.
+                end
+                TOP_FETCH: begin
+                    top_state_r <= TOP_DECODE;
+                end
+                TOP_DECODE: begin
+                    top_state_r <= TOP_EXEC;
+                end
+                TOP_EXEC: begin
+                    if (seq_skip) begin
+                        top_state_r <= TOP_DECODE;
+                    end else if (seq_commit) begin
+                        top_state_r <= TOP_FETCH;
+                    end
+                end
+                default: begin
+                    top_state_r <= TOP_IDLE;
+                end
+            endcase
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst || gpu_reset_i || t_seq_start) begin
+            rom_rd_pending_r <= 1'b0;
+            rom_rd_ready_r   <= 1'b0;
+        end else begin
+            if (rom_rd_issue) begin
+                rom_rd_pending_r <= 1'b1;
+                rom_rd_ready_r   <= 1'b0;
+            end else if (rom_rd_pending_r) begin
+                rom_rd_pending_r <= 1'b0;
+                rom_rd_ready_r   <= 1'b1;
+            end
+            if (ex_complete && ins_is_rom_rd)
+                rom_rd_ready_r <= 1'b0;
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) blend_gc_ack_r <= 1'b0;
+        else     blend_gc_ack_r <= gc_ack;
+    end
+
+    // ---- top-level instruction pipeline ----
+    typedef enum logic [2:0] {
+        TOP_IDLE   = 3'd0,
+        TOP_FETCH  = 3'd1,
+        TOP_DECODE = 3'd2,
+        TOP_EXEC   = 3'd3
+    } top_state_t;
+
+    top_state_t top_state_r;
+    logic [31:0] ins_word;
+    logic        rom_fetch_en;
+
     // Blocks
     // ================================================================
     microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
                     .INIT_FILE("rtl/bootloader.hex")) u_rom (
         .clk(clk),
-        .fetch_en_i(ex_ack),
+        .fetch_en_i(rom_fetch_en),
         .fetch_addr_i(seq_pc),
         .fetch_data_o(rom_fetch_data),
         .acc_we_i(t_rom_acc_we),
@@ -284,7 +362,7 @@ module top (
         .reg_target_i(t_seq_reg_target),
         .flag_z_i(flag_z_r), .flag_n_i(flag_n_r),
         .flag_c_i(flag_c_r), .flag_v_i(flag_v_r),
-        .insn_valid_i(ex_ack),
+        .insn_valid_i((top_state_r == TOP_EXEC) && ex_ack),
         .skip_o(seq_skip),
         .commit_o(seq_commit),
         .pc_o(seq_pc), .shadow_o(seq_shadow),
@@ -305,7 +383,7 @@ module top (
         .idx_we_i(t_pe_idx_we),   .idx_i(t_pe_idx),
         .step_we_i(t_pe_step_we), .step_i(t_pe_step),
         .access_i(t_pe_access),
-        .access_done_i(gc_ack),
+        .access_done_i(pe_access_done),
         .word_o(pe_word), .pos_o(pe_pos), .mode_o(pe_mode),
         .prefetch_o(pe_prefetch)
     );
@@ -333,7 +411,7 @@ module top (
         .adr_i(blend_adr), .mode_i(pe_mode), .pos_i(pe_pos),
         .dat_i(gc_rdata), .pixel_i(alu_result),
         .dat_o(blend_dat_o), .ack_o(blend_ack),
-        .ack_i(gc_ack),
+        .ack_i(blend_gc_ack_r),
         .rmw_req_o(blend_rmw_req), .rmw_we_o(blend_rmw_we),
         .rmw_dat_o(blend_rmw_dat)
     );
@@ -397,7 +475,6 @@ module top (
 
     // ================================================================
     // ROM access (ROML / ROMH / ROMA)
-    // ================================================================
     always_comb begin
         t_rom_acc_wdata = {16'h0, t_roml_r};
         if (ex_do && ins_is_mov && (ins_dst == 6'd39))
@@ -405,7 +482,7 @@ module top (
     end
 
     assign t_rom_acc_we = ex_do && ins_is_mov && (ins_dst == 6'd39);
-    assign t_rom_acc_re = ins_is_rom_rd && ex_complete;
+    assign t_rom_acc_re = rom_rd_issue;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -423,12 +500,6 @@ module top (
         end
     end
 
-    always_ff @(posedge clk) begin
-        if (rst) t_rom_wait_r <= 1'b0;
-        else     t_rom_wait_r <= ins_is_rom_rd && ex_complete;
-    end
-
-    // ================================================================
     // Register-file writeback
     // ================================================================
     assign t_rf_wr_en   = ex_do && ins_write && (ins_dst < 6'd32);
@@ -455,29 +526,26 @@ module top (
 
     // ================================================================
     // Flags
-    // ================================================================
-      always_ff @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (rst) begin
-            flag_z_r <= 1'b0; flag_n_r <= 1'b0;
-            flag_c_r <= 1'b0; flag_v_r <= 1'b0;
-        end else if (ex_do && ins_write && !ins_is_ctrl && (ins_dst == 6'd33)) begin
+            flag_z_r <= 1'b0;
+            flag_n_r <= 1'b0;
+            flag_c_r <= 1'b0;
+            flag_v_r <= 1'b0;
+        end else if (ex_do && ins_write && !ins_is_ctrl &&
+                     (ins_dst == 6'd33)) begin
             {flag_v_r, flag_c_r, flag_n_r, flag_z_r} <= alu_result[3:0];
-        end else if (ex_complete && ins_f && !ins_is_ctrl && !ins_is_ldi) begin
-            flag_z_r <= alu_flag_z; flag_n_r <= alu_flag_n;
-            flag_c_r <= alu_flag_c; flag_v_r <= alu_flag_v;
         end else if (ex_do && ins_f && !ins_is_ctrl && !ins_is_ldi) begin
             flag_z_r <= alu_flag_z;
             flag_n_r <= alu_flag_n;
             if (alu_upd_cv) begin
                 flag_c_r <= alu_flag_c;
                 flag_v_r <= alu_flag_v;
-            end            
+            end
         end
     end
 
-    // ================================================================
-    // Channel / cache control (combinational, no self-dependency)
-    // ================================================================
+    // Channel / cache control.
     always_comb begin
         t_ch          = 2'd0;
         t_pe_mode_we  = 1'b0; t_pe_mode  = 3'h0;
@@ -489,7 +557,6 @@ module top (
         t_gc_flush_en = 1'b0; t_gc_flush_ch = 2'd0;
         t_gc_access   = 1'b0; t_gc_we    = 1'b0; t_gc_wdata = 16'h0;
 
-        // host START: configure channel 0 as a 16 bpp word stream
         if (gpu_start_i) begin
             t_ch         = 2'd0;
             t_pe_mode_we = 1'b1; t_pe_mode = 3'd4;
@@ -499,78 +566,93 @@ module top (
             t_gc_page_we = 1'b1; t_gc_page = gpu_addr_i[23:16];
         end else if (ex_issue_do && ins_is_mov && ins_dst >= 6'd44) begin
             t_ch = ins_dst[1:0];
-            if (ins_dst < 6'd48) begin                 // DATA write (RMW)
-                // RMW через blend (см. always_ff ниже)
-            end else if (ins_dst < 6'd52) begin        // IDX
+            if (ins_dst < 6'd48) begin
+                // DATA write is handled by pixel_blender's RMW engine.
+            end else if (ins_dst < 6'd52) begin
                 t_pe_idx_we = 1'b1; t_pe_idx = alu_result;
-            end else if (ins_dst < 6'd56) begin        // IDXH
+            end else if (ins_dst < 6'd56) begin
                 t_pe_idxh_we = 1'b1; t_pe_idxh = alu_result[2:0];
-            end else if (ins_dst < 6'd60) begin        // STEP
+            end else if (ins_dst < 6'd60) begin
                 t_pe_step_we = 1'b1; t_pe_step = alu_result;
-            end else begin                             // MODE_PAGE
+            end else begin
                 t_pe_mode_we = 1'b1; t_pe_mode = alu_result[10:8];
                 t_gc_page_we = 1'b1; t_gc_page = alu_result[7:0];
             end
         end
 
-        // DATA read: держим доступ, пока blender не ответил ack
-        if (blend_cyc && !blend_ack) begin
-            t_ch         = blend_adr[1:0];
+        if (blend_cyc && !blend_we && !blend_read_done_r) begin
+            t_ch         = blend_adr[2:1];
             t_gc_access  = 1'b1;
             t_gc_we      = 1'b0;
             t_pe_access  = 1'b1;
         end
 
-        // FLUSH
         if (ex_issue_do && ins_is_flush) begin
             t_gc_flush_en = 1'b1;
             t_gc_flush_ch = ins_addr[1:0];
         end
 
-        // RMW: blender requests a cache access
-        if (blend_rmw_req) begin
-            t_ch        = blend_adr[1:0];
+        if (blend_rmw_req && !blend_rmw_done_r) begin
+            t_ch        = blend_adr[2:1];
             t_gc_access = 1'b1;
             t_gc_we     = blend_rmw_we;
             t_gc_wdata  = blend_rmw_dat;
         end
     end
 
-    // ================================================================
-    // Blender request FSM (registers — no combinational loop)
-    // ================================================================
+    // Advance the pixel pointer once per completed CPU DATA operation,
+    // not on the blender's internal RMW read and write acknowledgements.
+    assign pe_access_done = ex_complete && (ins_is_data_rd || ins_is_data_wr);
+
+    // Suppress repeated cache requests while the blender is still waiting
+    // for the registered ACK to propagate back through its RMW state machine.
     always_ff @(posedge clk) begin
         if (rst) begin
-            blend_cyc <= 1'b0;
-            blend_stb <= 1'b0;
-            blend_we  <= 1'b0;
-            blend_adr <= 3'd0;
+            blend_read_done_r <= 1'b0;
+            blend_rmw_done_r  <= 1'b0;
+            blend_rmw_we_d    <= 1'b0;
+        end else begin
+            if (!blend_cyc)
+                blend_read_done_r <= 1'b0;
+            else if (gc_ack && !blend_we)
+                blend_read_done_r <= 1'b1;
+
+            if (!blend_rmw_req || (blend_rmw_we != blend_rmw_we_d))
+                blend_rmw_done_r <= 1'b0;
+            else if (gc_ack && blend_rmw_req)
+                blend_rmw_done_r <= 1'b1;
+
+            blend_rmw_we_d <= blend_rmw_we;
+        end
+    end
+
+    // Blender request controller: keep request/address/data stable until ACK.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            blend_cyc        <= 1'b0;
+            blend_stb        <= 1'b0;
+            blend_we         <= 1'b0;
+            blend_adr        <= 3'd0;
             access_pending_r <= 1'b0;
         end else begin
-            // старт нового DATA read (только если не pending)
-            if (ex_issue_do && ins_is_data_rd && !access_pending_r) begin
-                blend_cyc <= 1'b1;
-                blend_stb <= 1'b1;
-                blend_we  <= 1'b0;
-                blend_adr <= {ins_src[1:0], 1'b0};
+            if (ex_issue_do && (ins_is_data_rd || ins_is_data_wr) &&
+                !access_pending_r) begin
+                blend_cyc        <= 1'b1;
+                blend_stb        <= 1'b1;
+                blend_we         <= ins_is_data_wr;
+                blend_adr        <= ins_is_data_wr
+                                  ? {ins_dst[1:0], 1'b1}
+                                  : {ins_src[1:0], 1'b0};
                 access_pending_r <= 1'b1;
             end
-            // blender ответил — снимаем cyc, но pending остаётся до pc++
-            else if (blend_cyc && blend_ack) begin
+
+            if (blend_cyc && blend_ack) begin
                 blend_cyc <= 1'b0;
                 blend_stb <= 1'b0;
             end
-            // pc сдвинулся (ex_ack = 1) — снимаем pending
-            if (ex_ack && access_pending_r) begin
+
+            if (ex_complete && access_pending_r)
                 access_pending_r <= 1'b0;
-            end
-            // RMW (write)
-            if (blend_rmw_req) begin
-                blend_cyc <= 1'b1;
-                blend_stb <= 1'b1;
-                blend_we  <= blend_rmw_we;
-                blend_adr <= {t_ch, 1'b1};
-            end
         end
     end
 

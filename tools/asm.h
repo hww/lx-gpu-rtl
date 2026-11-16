@@ -199,30 +199,126 @@ static inline uint32_t asm_line(const std::string& raw,
 // ---------- сборка массива строк в массив слов (2 прохода: метки, затем инструкции) ----------
 static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>& lines) {
     std::map<std::string,int> labels;
-    // проход 1: метки
+    std::vector<uint32_t> words;
+    
+    // ==========================================
+    // Проход 1: Собираем метки с учётом .org
+    // ==========================================
     int pc = 0;
-    for (auto& l : lines) {
+    for (auto& raw : lines) {
+        std::string line = asm_trim(asm_strip_comment(raw));
+        if (line.empty()) continue;
+
+        // Обработка метки
+        size_t colon = line.find(':');
+        if (colon != std::string::npos) {
+            std::string label = asm_trim(line.substr(0, colon));
+            labels[label] = pc;
+            line = asm_trim(line.substr(colon + 1));
+            if (line.empty()) continue;
+        }
+
+        // Обработка .org
+        if (line.rfind(".org", 0) == 0 || line.rfind(".ORG", 0) == 0) {
+            std::string arg = asm_trim(line.substr(4));
+            pc = (int)asm_parse_int(arg);
+            continue;
+        }
+
+        // Обработка .word
+        if (line.rfind(".word", 0) == 0 || line.rfind(".WORD", 0) == 0) {
+            std::string arg = asm_trim(line.substr(5));
+            // .word может содержать несколько значений через запятую
+            std::string cur;
+            for (char c : arg) {
+                if (c == ',') { pc++; cur.clear(); }
+                else cur += c;
+            }
+            if (!cur.empty()) pc++;
+            continue;
+        }
+
+        // Обычная инструкция (или L-префикс)
+        // Если это не .org и не .word, значит инструкция занимает 1 слово
         int ok = 0;
-        asm_line(l, labels, pc, &ok);
+        asm_line(line, labels, pc, &ok);
         if (ok) pc++;
     }
-    // проход 2: инструкции
-    std::vector<uint32_t> words;
-    for (auto& l : lines) {
+
+    // ==========================================
+    // Проход 2: Генерируем код с учётом .org
+    // ==========================================
+    for (auto& raw : lines) {
+        std::string line = asm_trim(asm_strip_comment(raw));
+        if (line.empty()) continue;
+
+        // Пропускаем метки
+        size_t colon = line.find(':');
+        if (colon != std::string::npos) {
+            line = asm_trim(line.substr(colon + 1));
+            if (line.empty()) continue;
+        }
+
+        // Обработка .org — заполняем нулями до нужного адреса
+        if (line.rfind(".org", 0) == 0 || line.rfind(".ORG", 0) == 0) {
+            std::string arg = asm_trim(line.substr(4));
+            int target = (int)asm_parse_int(arg);
+            while (words.size() < (size_t)target) {
+                words.push_back(0);
+            }
+            continue;
+        }
+
+        // Обработка .word
+        if (line.rfind(".word", 0) == 0 || line.rfind(".WORD", 0) == 0) {
+            std::string arg = asm_trim(line.substr(5));
+            std::string cur;
+            for (char c : arg) {
+                if (c == ',') {
+                    words.push_back((uint32_t)asm_parse_int(cur));
+                    cur.clear();
+                }
+                else cur += c;
+            }
+            if (!cur.empty()) words.push_back((uint32_t)asm_parse_int(cur));
+            continue;
+        }
+
+        // Обычная инструкция
         int ok = 0;
-        uint32_t w = asm_line(l, labels, (int)words.size(), &ok);
+        uint32_t w = asm_line(line, labels, (int)words.size(), &ok);
         if (ok) words.push_back(w);
     }
+
     return words;
 }
 
 // ---------- вспомогательное: собрать .asm файл в слова ----------
-static inline std::vector<uint32_t> asm_assemble_file(const char* path) {
+static inline std::vector<uint32_t> asm_assemble_file(const char* path, uint16_t* out_org = nullptr) {
     std::vector<std::string> lines;
     FILE* fp = fopen(path, "r");
     if (!fp) { fprintf(stderr, "asm: cannot open %s\n", path); return {}; }
     char buf[512];
     while (fgets(buf, sizeof buf, fp)) lines.push_back(buf);
     fclose(fp);
-    return asm_assemble(lines);
+
+    // Проверяем, есть ли начальный .org до первой инструкции
+    int initial_org = -1;
+    for (auto& raw : lines) {
+        std::string line = asm_trim(asm_strip_comment(raw));
+        if (line.empty()) continue;
+        if (line.rfind(".org", 0) == 0 || line.rfind(".ORG", 0) == 0) {
+            initial_org = (int)asm_parse_int(asm_trim(line.substr(4)));
+        }
+        break;
+    }
+
+    auto words = asm_assemble(lines);
+
+    if (initial_org > 0 && (size_t)initial_org <= words.size()) {
+        if (out_org) *out_org = (uint16_t)initial_org;
+        // Отрезаем ведущие нули, т.к. смещение задаётся полем START в заголовке пакета
+        words.erase(words.begin(), words.begin() + initial_org);
+    }
+    return words;
 }
