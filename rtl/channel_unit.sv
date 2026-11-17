@@ -5,6 +5,7 @@ module channel_unit (
     input  logic        clk,
     input  logic        rst,
 
+    // Сигнал старта от хоста
     input  logic        preload_i,
     input  logic [23:0] preload_addr_i,
 
@@ -45,7 +46,7 @@ module channel_unit (
     logic [3:0]  pe_pos;
     logic [2:0]  pe_mode;
     logic        pe_prefetch;
-    logic        pe_access_done; // Импульс: данные готовы, IDX++
+    logic        pe_access_done;
 
     // --- Сигналы от gpu_cache ---
     logic [23:0] cache_addr24;
@@ -56,34 +57,56 @@ module channel_unit (
     logic        cache_flush_done;
     logic        cache_error;
 
-    // --- Запись регистров каналов ---
-    // Распаковываем 16-битные данные от процессора в нужные форматы для pixel_engine
-    // modepage_we_i: пишем в MODE (младшие 3 бита)
-    // idx_we_i: пишем IDX
-    // idxh_we_i: пишем IDXH (старшие 3 бита адреса)
-    // step_we_i: пишем STEP
-    logic mode_we, idxh_we, idx_we, step_we;
-    logic [2:0] mode_val;
-    logic [2:0] idxh_val;
+    // --- Мультиплексоры: что писать в pixel_engine и gpu_cache ---
+    logic        pe_mode_we, pe_idxh_we, pe_idx_we, pe_step_we;
+    logic [2:0]  pe_mode_val, pe_idxh_val;
+    logic [15:0] pe_idx_val, pe_step_val;
+    logic        cache_page_we;
+    logic [7:0]  cache_page_val;
 
-    assign mode_we  = modepage_we_i;
-    assign mode_val = wdata_i[2:0];
-    
-    assign idxh_we  = idxh_we_i;
-    assign idxh_val = wdata_i[2:0];
+    always_comb begin
+        // По умолчанию берем данные от процессора
+        // По умолчанию берем данные от процессора
+        pe_mode_we  = modepage_we_i;
+        pe_mode_val = wdata_i[10:8];  // FMT (MODE) - биты 10..8
+        
+        pe_idxh_we  = idxh_we_i;
+        pe_idxh_val = wdata_i[2:0];
+        
+        pe_idx_we   = idx_we_i;
+        pe_idx_val  = wdata_i;
+        
+        pe_step_we  = step_we_i;
+        pe_step_val = wdata_i;
+        
+        // PAGE - это биты 7..0
+        cache_page_we  = modepage_we_i; 
+        cache_page_val = wdata_i[7:0];
 
-    assign idx_we   = idx_we_i;
-    assign step_we  = step_we_i;
+        // Если пришел старт от хоста — принудительно настраиваем канал 0
+        if (preload_i) begin
+            pe_mode_we  = 1'b1;
+            pe_mode_val = 3'd4;     // FMT = 4 (16bpp)
+            
+            pe_step_we  = 1'b1;
+            pe_step_val = 16'd16;   // STEP = 1 слово
+            
+            pe_idx_we   = 1'b1;
+            pe_idx_val  = {1'b0, preload_addr_i[15:1]}; // Адрес в словах
+            
+            cache_page_we  = 1'b1;
+            cache_page_val = preload_addr_i[23:16]; // PAGE
+        end
+    end
 
-    // Выбор канала: при записи берем из dst, при чтении из src (уже передано в ch_i из top.sv)
-    
+    // --- Инстанс pixel_engine ---
     pixel_engine u_pe (
         .clk(clk), .rst(rst),
         .ch_i(ch_i),
-        .mode_we_i(mode_we), .mode_i(mode_val),
-        .idxh_we_i(idxh_we), .idxh_i(idxh_val),
-        .idx_we_i(idx_we), .idx_i(wdata_i),
-        .step_we_i(step_we), .step_i(wdata_i),
+        .mode_we_i(pe_mode_we), .mode_i(pe_mode_val),
+        .idxh_we_i(pe_idxh_we), .idxh_i(pe_idxh_val),
+        .idx_we_i(pe_idx_we),   .idx_i(pe_idx_val),
+        .step_we_i(pe_step_we), .step_i(pe_step_val),
         .access_i(data_req_i),
         .access_done_i(pe_access_done),
         .word_o(pe_word),
@@ -92,6 +115,7 @@ module channel_unit (
         .prefetch_o(pe_prefetch)
     );
 
+    // --- Инстанс gpu_cache ---
     gpu_cache u_cache (
         .clk(clk), .rst(rst),
         .ch_i(ch_i),
@@ -99,14 +123,14 @@ module channel_unit (
         .access_i(data_req_i),
         .prefetch_i(pe_prefetch),
         .we_i(data_we_i),
-        .wdata_i(wdata_i),         // Для записи в память
+        .wdata_i(wdata_i),
         .hit_o(cache_hit),
         .rdata_o(cache_rdata),
         .ack_o(cache_ack),
-        .page_we_i(1'b0),          // TODO: PAGE регистр (если есть)
-        .page_i(8'h0),
+        .page_we_i(cache_page_we),
+        .page_i(cache_page_val),
         .page_o(cache_page),
-        .flush_en_i(flush_req_i),  // Упрощенно: flush по маске
+        .flush_en_i(flush_req_i),
         .flush_ch_i(ch_i),
         .flush_done_o(cache_flush_done),
         .wb_cyc_o(wb_cyc_o),
@@ -121,34 +145,11 @@ module channel_unit (
     );
 
     // --- Handshake для процессора ---
-    // Когда gpu_cache выдает ack (данные прочитаны/записаны), 
-    // мы должны сообщить pixel_engine, чтобы он сдвинул IDX.
     assign pe_access_done = cache_ack;
-
-    // data_ack_o для процессора: это тот же сигнал, что и cache_ack
-    assign data_ack_o = cache_ack;
-    
-    // data_rdata_o: если чтение, отдаем данные из кэша, иначе 0
-    assign data_rdata_o = cache_rdata;
-
-    // flush_ack_o: ждем, пока кэш не закончит writeback
-    assign flush_ack_o = cache_flush_done;
-
-    assign status_o = {3'b0, cache_error};
-    assign error_o = cache_error;
-
-    // Предзагрузка (из gpu_start): устанавливаем начальный адрес
-    // В bootloader'е это выставляется через PAGE и IDX, но preload_i
-    // может сразу задать PAGE и IDX (нужно для gpu_start).
-    // В нашем случае bootloader сам ставит PAGE и IDX, так что preload_i
-    // можно пока игнорировать или использовать для сброса PAGE0.
-    // (Пока оставим закомментированным, т.к. bootloader настраивает всё сам).
-    /*
-    always_ff @(posedge clk) begin
-        if (preload_i) begin
-            // Здесь должен быть сброс PAGE и IDX для канала 0
-        end
-    end
-    */
+    assign data_ack_o     = cache_ack;
+    assign data_rdata_o   = cache_rdata;
+    assign flush_ack_o    = cache_flush_done;
+    assign status_o       = {3'b0, cache_error};
+    assign error_o        = cache_error;
 
 endmodule

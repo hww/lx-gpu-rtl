@@ -53,6 +53,22 @@ sim-top: top
 sim-top-v: top
 	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_sprite.asm -gpuaddr 32
 
+sim-top-alu-v: top
+	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_alu.asm -gpuaddr 32
+
+sim-top-sprite: top
+	./$(BUILD)/sim_top/Vtop \
+		-prog sim/test_sprite.asm -gpuaddr 32 \
+		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0400 \
+		-out images/output.png
+
+sim-top-sprite-v: top
+	./$(BUILD)/sim_top/Vtop \
+	    -v \
+		-prog sim/test_sprite.asm -gpuaddr 32 \
+		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0400 \
+		-out images/output.png	
+
 # ---- остальные sim-* (модульные тесты) ----
 sim-alu: | $(BUILD)
 	mkdir -p $(BUILD)/sim_alu
@@ -119,7 +135,7 @@ sim-channel: | $(BUILD)
 	    rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv \
 	    sim/tb_channel.sv $(CURDIR)/sim/tb_channel.cpp
 	./$(BUILD)/sim_channel/Vtb_channel
-	
+
 sim-ch: | $(BUILD)
 	mkdir -p $(BUILD)/tb_channel_unit
 	verilator --cc --exe --build -j 1 -DSIMULATION \
@@ -157,8 +173,3 @@ bit: pnr
 clean:
 	rm -rf $(BUILD)
 
-sprite: top
-	./$(BUILD)/sim_top/Vtop \
-		-prog sim/test_sprite.asm -gpuaddr 32 \
-		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0200 \
-		-out images/output.png

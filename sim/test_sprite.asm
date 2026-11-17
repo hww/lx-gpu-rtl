@@ -1,34 +1,26 @@
-        .org 0x20           ; Программа начнется с адреса 0x20
-
-draw_start:
-        ; --- Канал 0 (источник: спрайт) ---
-        LDI     R5, #0x0200
+        ; --- Канал 0 (спрайт 8bpp, страница 2) ---
+        LDI     R5, #0x0302      ; FMT=3 (8bpp), PAGE=2
         MOV     PAGE0, R5
-        LDI     R5, #16
+        LDI     R5, #16          ; STEP0 = 16 (1 слово)
         MOV     STEP0, R5
         MOV     IDXH0, #0
-        LDI     R4, #0x0040
+        LDI     R4, #0x0022      ; IDX0 = 0x22 (начало спрайта в RAM)
         MOV     IDX0, R4
 
-        ; --- Канал 1 (framebuffer) ---
-        LDI     R5, #0x0201
+        ; --- Канал 1 (framebuffer 8bpp, страница 2) ---
+        LDI     R5, #0x0302      ; FMT=3 (8bpp), PAGE=2
         MOV     PAGE1, R5
-        LDI     R5, #16
+        LDI     R5, #16          ; STEP1 = 16
         MOV     STEP1, R5
         MOV     IDXH1, #0
-        MOV     IDX1, #0
+        MOV     IDX1, #0         ; IDX1 = 0 (куда пишем)
 
         ; --- Цикл ---
-        LDI     R0, #256
+        LDI     R0, #128         ; 128 слов (256 пикселей / 2)
 draw_loop:
         MOV     R2, DATA0
         MOV     DATA1, R2
         SUB     R0, #1
         JMP.NE  draw_loop
+        FLUSH 3                  ; Сброс каналов 0 и 1 (маска 0011)
         HALT
-
-        .org 0x40           ; Спрайт лежит с адреса 0x40
-        ; Данные спрайта (16x16 4bpp = 64 слова по 16 бит = 32 слова по 32 бита)
-        ; Я добавлю сюда тестовый узор "шахматка"
-        .word 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF
-        ; ... и так далее (для теста)

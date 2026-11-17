@@ -141,6 +141,7 @@ module gpu_cache (
                 wb_cyc_o = 1'b1;
                 wb_stb_o = 1'b1;
                 wb_adr_o = {op_page, op_word, 1'b0};
+                wb_we_o  = op_we; // <-- РАЗРЕШАЕМ ЗАПИСЬ
             end
             ST_WRITEBACK: begin
                 wb_cyc_o = 1'b1;
@@ -157,7 +158,7 @@ module gpu_cache (
     logic fill_done_c;
     logic access_finish_c;
 
-    assign fill_done_c     = (state == ST_FILL) && wb_ack_i && op_is_access && (ch_i == op_ch);
+    assign fill_done_c     = (state == ST_FILL) && wb_ack_i && op_is_access;
     assign access_finish_c = access_i && (hit || fill_done_c) && !access_done_r;
 
     always_ff @(posedge clk) begin

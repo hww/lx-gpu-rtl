@@ -60,9 +60,10 @@ static bool load_file_smart(const char* path, uint32_t mem_off, uint32_t gpu_add
         mem[a++] = gpu_start_addr;                              // START
         uint32_t gpu_pc = gpu_start_addr;
         for (auto w : words) {
+            auto cur_a = a;
             mem[a++] = (uint16_t)(w & 0xFFFF);
             mem[a++] = (uint16_t)((w >> 16) & 0xFFFF);
-            printf("  Z80_RAM[%04X] GPU_ROM[%04X] %08X  %s\n", a, gpu_pc++, w, disasm32(w));
+            printf("  Z80_RAM[%04X] GPU_ROM[%04X] %08X  %s\n", cur_a, gpu_pc++, w, disasm32(w));
         }
         return true;
 
@@ -152,14 +153,29 @@ static void tick(int clk, bool log) {
     if (tfp_p) tfp_p->dump(cycles);
     ++cycles;
 
-    if (log && g_verbose) {
-        uint32_t insn = (uint32_t)dut->rootp->top__DOT__rom_fetch_data;
-        printf("[dbg] t=%llu pc=%03X halted=%d error=%d insn=%08X  %s\n",
-            (unsigned long long)cycles,
-            (unsigned)dut->pc_o,
-            (int)dut->halted_o, (int)dut->error_o,
-            insn,
-            disasm32(insn));
+    // Печатаем инструкцию только в момент её завершения (x_do == 1)
+    // и только на переднем фронте клока (чтобы не дублировать)
+    if (log && g_verbose && clk == 1 && dut->rootp->top__DOT__x_do) {
+        uint32_t insn = (uint32_t)dut->rootp->top__DOT__x_ins_r;
+        
+        // Вычисляем адрес текущей инструкции. 
+        // fu_pc уже указывает на следующую, поэтому вычитаем 1.
+        // Если был переход (t_fu_x_jump), то fu_pc - это target, и вычитать 1 нельзя.
+        // Но для лога просто покажем fu_pc (адрес следующей) и текущую инструкцию.
+        uint32_t pc_cur = (uint32_t)dut->pc_o; 
+        if (dut->rootp->top__DOT__t_fu_x_jump) {
+            // Если это JMP по регистру, pc_o уже target. 
+            // Оставим как есть, чтобы видеть, куда прыгнули.
+        } else {
+            pc_cur = (pc_cur > 0) ? (pc_cur - 1) : 0;
+        }
+
+        // Форматируем вывод: t=..., PC=..., insn, disasm
+        printf("[dbg] t=%llu PC=%03X  %08X  %s\n",
+               (unsigned long long)cycles,
+               pc_cur,
+               insn,
+               disasm32(insn));
     }
 }
 
@@ -167,6 +183,21 @@ static void step() {
     // WB slave
     dut->wb_ack_i = 0;
     dut->wb_dat_i = 0;
+
+    // --- ЛОГ WISHBONE (только при -v) ---
+    if (g_verbose && dut->wb_cyc_o && dut->wb_stb_o) {
+        uint32_t addr = (dut->wb_adr_o >> 1) & (MEM_WORDS - 1);
+        // Достаем IDX и STEP из pixel_engine (канал 0)
+        uint32_t idx_cur  = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__idx_step_mem[0];
+        uint32_t step_cur = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__idx_step_mem[1];
+        printf("[WB] %s adr=0x%04X dat=0x%04X (IDX=0x%05X STEP=0x%05X)\n",
+               dut->wb_we_o ? "WR" : "RD",
+               (unsigned)dut->wb_adr_o,
+               (unsigned)dut->wb_we_o ? (unsigned)dut->wb_dat_o : (unsigned)mem[addr],
+               idx_cur, step_cur);
+    }
+
+
     if (dut->wb_cyc_o && dut->wb_stb_o) {
         uint32_t a = (dut->wb_adr_o >> 1) & (MEM_WORDS - 1);
         if (dut->wb_we_o) mem[a] = dut->wb_dat_o;

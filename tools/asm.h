@@ -136,9 +136,18 @@ static inline uint32_t asm_line(const std::string& raw,
                                       : isa::CTRL_FLUSH;
         uint32_t code = 0;
         if (!args.empty()) {
-            code = labels.count(args[0])
-                 ? (uint32_t)labels[args[0]]
-                 : (uint32_t)asm_parse_int(args[0]);
+            if (labels.count(args[0])) {
+                code = (uint32_t)labels[args[0]];
+            } else {
+                char* endptr;
+                long val = strtol(args[0].c_str(), &endptr, 0);
+                if (*endptr != '\0') {
+                    fprintf(stderr, "asm: invalid argument '%s' for %s (must be a number or label)\n", 
+                            args[0].c_str(), mn.c_str());
+                    return 0;
+                }
+                code = (uint32_t)val;
+            }
         }
         *ok = 1;
         return enc_ctrl(op, code & 0xFFF, 0);
