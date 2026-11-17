@@ -207,8 +207,11 @@ module top (
         .acc_rdata_o(rom_acc_rdata)
     );
 
+
     fetch_unit u_fu (
-        .clk(clk), .rst(rst), .clear_i(t_clear),
+        .clk(clk), 
+        .rst(rst),
+        .clear_i(t_clear),   
         .adv_i(adv), .ir_i(rom_fetch_data),
         .flags_i({flag_v_r, flag_c_r, flag_n_r, flag_z_r}),
         .x_hazard_i(t_fu_x_hazard),
@@ -231,6 +234,8 @@ module top (
         .flag_z(alu_flag_z), .flag_n(alu_flag_n),
         .flag_c(alu_flag_c), .flag_v(alu_flag_v), .upd_cv(alu_upd_cv)
     );
+    
+    logic ch_preload_busy, ch_preload_done;
 
     channel_unit u_ch (
         .clk(clk), .rst(rst),
@@ -246,7 +251,9 @@ module top (
         .status_o(ch_status), .error_o(ch_error),
         .wb_cyc_o(wb_cyc_o), .wb_stb_o(wb_stb_o), .wb_we_o(wb_we_o),
         .wb_adr_o(wb_adr_o), .wb_dat_o(wb_dat_o),
-        .wb_dat_i(wb_dat_i), .wb_ack_i(wb_ack_i)
+        .wb_dat_i(wb_dat_i), .wb_ack_i(wb_ack_i),
+        .preload_busy_o(ch_preload_busy),
+        .preload_done_o(ch_preload_done)
     );
 
     // ================================================================
@@ -357,8 +364,8 @@ module top (
     // ================================================================
     // Run control: HALT, IRQ, hardware errors, host START / RESET
     // ================================================================
-    assign t_go    = start_i | gpu_start_i;
-    assign t_clear = t_go | gpu_reset_i;
+    assign t_go    = start_i | ch_preload_done;
+    assign t_clear = start_i | ch_preload_done | gpu_reset_i;
 
     always_comb begin
         t_halt_set  = 1'b0;
@@ -381,7 +388,7 @@ module top (
             irq_pending_r <= 1'b0; irq_code_r <= 8'h0;
         end else if (gpu_reset_i) begin
             halted_r <= 1'b1; halt_code_r <= 7'h0; irq_pending_r <= 1'b0;
-        end else if (t_go) begin
+        end else if (ch_preload_done) begin
             halted_r <= 1'b0; halt_code_r <= 7'h0; irq_pending_r <= 1'b0;
         end else begin
             if (irq_ack_i) irq_pending_r <= 1'b0;

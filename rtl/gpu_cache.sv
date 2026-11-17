@@ -1,16 +1,19 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// gpu_cache: one-word cache entry per channel (CH0..CH3).
-// Wishbone master. ack_o / flush_done_o are one-cycle strobes.
+// gpu_cache: one-word cache entry per channel (CH0..CH3), write-back.
+// Wishbone master; ack_o and flush_done_o are one-cycle strobes.
 //
-// FSM: ST_IDLE -> ST_FILL      (wb_cyc_o held until wb_ack_i) -> ST_IDLE
-//      ST_IDLE -> ST_WRITEBACK (wb_cyc_o held until wb_ack_i) -> ST_IDLE
+// A miss on a dirty entry first writes the old word back (old tag, old page),
+// then fills. A page write is deferred until the old entry is written back.
+// FLUSH is only needed to push out the last dirty words at the end of a task.
+//
+// Contract: access_i must drop in the cycle ack_o is high; flush_ch_i must
+// stay stable until flush_done_o.
 module gpu_cache (
     input  logic        clk,
     input  logic        rst,
 
-    // channel select (applies to access, prefetch, page and result outputs)
     input  logic [1:0]  ch_i,
 
     // access / prefetch request (word address inside the page)
@@ -23,12 +26,12 @@ module gpu_cache (
     output logic [15:0] rdata_o,
     output logic        ack_o,
 
-    // channel page register (write also invalidates the entry)
+    // channel page register
     input  logic        page_we_i,
     input  logic [7:0]  page_i,
     output logic [7:0]  page_o,
 
-    // flush one channel; flush_ch_i must stay stable until flush_done_o
+    // flush one channel
     input  logic        flush_en_i,
     input  logic [1:0]  flush_ch_i,
     output logic        flush_done_o,
@@ -42,88 +45,93 @@ module gpu_cache (
     input  logic        wb_ack_i,
     input  logic [15:0] wb_dat_i,
 
-    // debug / status
     output logic [23:0] addr24_o,
     output logic        error_o
 );
 
     localparam int NUM_CH = 4;
 
-    logic [14:0] tag_mem  [0:NUM_CH-1];
-    logic [15:0] data_mem [0:NUM_CH-1];
-    logic [7:0]  page_mem [0:NUM_CH-1];
-    logic        valid_r  [0:NUM_CH-1];
-    logic        dirty_r  [0:NUM_CH-1];
+    logic [14:0] tag_mem     [0:NUM_CH-1];
+    logic [15:0] data_mem    [0:NUM_CH-1];
+    logic [7:0]  page_mem    [0:NUM_CH-1];
+    logic        valid_r     [0:NUM_CH-1];
+    logic        dirty_r     [0:NUM_CH-1];
+    logic        pend_r      [0:NUM_CH-1];   // page change waiting
+    logic [7:0]  pend_page_r [0:NUM_CH-1];
 
-    // ===== request view of the selected channel =====
-    logic [14:0] req_word;
-    logic [7:0]  req_page;
-    logic        hit;
-
-    assign req_word = word_i;
-    assign req_page = page_mem[ch_i];
-    assign addr24_o = {req_page, req_word, 1'b0};
-    assign page_o   = req_page;
-
-    assign hit      = valid_r[ch_i] && (tag_mem[ch_i] == req_word);
-    assign hit_o    = hit;
-    assign rdata_o  = data_mem[ch_i];
-
-    // ===== FSM state and the operation in flight =====
     typedef enum logic [1:0] { ST_IDLE, ST_FILL, ST_WRITEBACK } state_t;
     state_t state;
 
     logic [1:0]  op_ch;
     logic [14:0] op_word;
     logic [7:0]  op_page;
-    logic        op_we;
-    logic [15:0] op_wdata;
-    logic        op_is_access;
+    logic        op_flush_r;     // the writeback in flight is a FLUSH
 
-    // ===== flush request tracking =====
-    logic flush_req_r;       // flush requested, not finished yet
-    logic flush_active_r;    // its writeback has been issued
-    logic flush_done_r;
-    logic access_done_r;
+    // ===== request view =====
+    logic hit, busy_same;
+    assign busy_same = (state != ST_IDLE) && (op_ch == ch_i);
+    assign hit       = valid_r[ch_i] && (tag_mem[ch_i] == word_i)
+                       && !pend_r[ch_i] && !busy_same;
 
-    // ===== choice of the next operation (only in ST_IDLE) =====
-    logic        issue_fill, issue_wb;
-    logic [1:0]  issue_ch;
-    logic [14:0] issue_word;
-    logic [7:0]  issue_page;
-    logic        issue_we;
-    logic [15:0] issue_wdata;
-    logic        issue_is_access;
+    assign hit_o    = hit;
+    assign rdata_o  = data_mem[ch_i];
+    assign page_o   = page_mem[ch_i];
+    assign addr24_o = {page_mem[ch_i], word_i, 1'b0};
+    assign error_o  = 1'b0;      // page overflow is detected in pixel_engine
 
+    // ===== flush tracking =====
+    logic flush_req_r, flush_done_r;
+    logic flush_noop_c, flush_done_c;
+
+    assign flush_noop_c = (state == ST_IDLE) && flush_req_r
+                       && !(valid_r[flush_ch_i] && dirty_r[flush_ch_i]);
+    assign flush_done_c = ((state == ST_WRITEBACK) && wb_ack_i && op_flush_r)
+                       || flush_noop_c;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            flush_req_r  <= 1'b0;
+            flush_done_r <= 1'b0;
+        end else begin
+            if (flush_done_r) flush_req_r <= 1'b0;
+            if (flush_en_i)   flush_req_r <= 1'b1;     // a new request wins
+            flush_done_r <= flush_done_c && !flush_done_r;
+        end
+    end
+    assign flush_done_o = flush_done_r;
+
+    // ===== what to do next (only in ST_IDLE) =====
+    logic       pend_any;
+    logic [1:0] pend_ch;
     always_comb begin
-        issue_fill      = 1'b0;
-        issue_wb        = 1'b0;
-        issue_ch        = 2'd0;
-        issue_word      = 15'h0;
-        issue_page      = 8'h0;
-        issue_we        = 1'b0;
-        issue_wdata     = 16'h0;
-        issue_is_access = 1'b0;
+        pend_any = 1'b0;
+        pend_ch  = 2'd0;
+        for (int i = NUM_CH-1; i >= 0; i--)
+            if (pend_r[i]) begin pend_any = 1'b1; pend_ch = i[1:0]; end
+    end
+
+    logic       issue_apply, issue_wb, issue_fill, issue_flush;
+    logic [1:0] issue_ch;
+    always_comb begin
+        issue_apply = 1'b0;
+        issue_wb    = 1'b0;
+        issue_fill  = 1'b0;
+        issue_flush = 1'b0;
+        issue_ch    = 2'd0;
 
         if (state == ST_IDLE) begin
-            if (access_i && !hit) begin
-                issue_fill      = 1'b1;
-                issue_ch        = ch_i;
-                issue_word      = req_word;
-                issue_page      = req_page;
-                issue_we        = we_i;
-                issue_wdata     = wdata_i;
-                issue_is_access = 1'b1;
+            if (pend_any) begin
+                issue_ch = pend_ch;
+                if (valid_r[pend_ch] && dirty_r[pend_ch]) issue_wb    = 1'b1;
+                else                                      issue_apply = 1'b1;
             end else if (flush_req_r && valid_r[flush_ch_i] && dirty_r[flush_ch_i]) begin
-                issue_wb        = 1'b1;
-                issue_ch        = flush_ch_i;
-                issue_word      = tag_mem[flush_ch_i];
-                issue_page      = page_mem[flush_ch_i];
-            end else if (prefetch_i && !hit) begin
-                issue_fill      = 1'b1;
-                issue_ch        = ch_i;
-                issue_word      = req_word;
-                issue_page      = req_page;
+                issue_wb    = 1'b1;
+                issue_flush = 1'b1;
+                issue_ch    = flush_ch_i;
+            end else if ((access_i || prefetch_i) && !hit) begin
+                issue_ch = ch_i;
+                if (valid_r[ch_i] && dirty_r[ch_i]) issue_wb   = 1'b1;   // evict first
+                else                                issue_fill = 1'b1;
             end
         end
     end
@@ -135,13 +143,11 @@ module gpu_cache (
         wb_we_o  = 1'b0;
         wb_adr_o = 24'h0;
         wb_dat_o = 16'h0;
-
         case (state)
             ST_FILL: begin
                 wb_cyc_o = 1'b1;
                 wb_stb_o = 1'b1;
                 wb_adr_o = {op_page, op_word, 1'b0};
-                wb_we_o  = op_we; // <-- РАЗРЕШАЕМ ЗАПИСЬ
             end
             ST_WRITEBACK: begin
                 wb_cyc_o = 1'b1;
@@ -155,74 +161,33 @@ module gpu_cache (
     end
 
     // ===== ack_o: one-cycle strobe =====
-    logic fill_done_c;
-    logic access_finish_c;
-
-    assign fill_done_c     = (state == ST_FILL) && wb_ack_i && op_is_access;
-    assign access_finish_c = access_i && (hit || fill_done_c) && !access_done_r;
-
+    logic ack_r;
     always_ff @(posedge clk) begin
-        if (rst) access_done_r <= 1'b0;
-        else     access_done_r <= access_finish_c;
+        if (rst) ack_r <= 1'b0;
+        else     ack_r <= access_i && hit && !ack_r;
     end
-    assign ack_o = access_done_r;
-
-    // ===== flush_done_o: one-cycle strobe =====
-    // flush of an invalid or clean channel needs no bus cycle (no-op flush)
-    logic flush_noop_c;
-    logic flush_done_c;
-
-    assign flush_noop_c = (state == ST_IDLE) && flush_req_r
-                       && !(valid_r[flush_ch_i] && dirty_r[flush_ch_i]);
-    assign flush_done_c = ((state == ST_WRITEBACK) && wb_ack_i && flush_active_r && (op_ch == flush_ch_i))
-                       || flush_noop_c;
-
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            flush_req_r    <= 1'b0;
-            flush_active_r <= 1'b0;
-            flush_done_r   <= 1'b0;
-        end else begin
-            if (flush_en_i)    flush_req_r <= 1'b1;
-            if (flush_done_r)  flush_req_r <= 1'b0;
-
-            if (flush_req_r && !flush_active_r && state == ST_IDLE) flush_active_r <= 1'b1;
-            if (flush_done_r)  flush_active_r <= 1'b0;
-
-            flush_done_r <= flush_done_c && !flush_done_r;
-        end
-    end
-    assign flush_done_o = flush_done_r;
+    assign ack_o = ack_r;
 
     // ===== state, entries and flags =====
     always_ff @(posedge clk) begin
         if (rst) begin
             for (int i = 0; i < NUM_CH; i++) begin
-                tag_mem[i]  <= 15'h0;
-                data_mem[i] <= 16'h0;
-                page_mem[i] <= 8'h0;
-                valid_r[i]  <= 1'b0;
-                dirty_r[i]  <= 1'b0;
+                tag_mem[i]     <= 15'h0;
+                data_mem[i]    <= 16'h0;
+                page_mem[i]    <= 8'h0;
+                valid_r[i]     <= 1'b0;
+                dirty_r[i]     <= 1'b0;
+                pend_r[i]      <= 1'b0;
+                pend_page_r[i] <= 8'h0;
             end
-            state        <= ST_IDLE;
-            op_ch        <= 2'd0;
-            op_word      <= 15'h0;
-            op_page      <= 8'h0;
-            op_we        <= 1'b0;
-            op_wdata     <= 16'h0;
-            op_is_access <= 1'b0;
-            error_o      <= 1'b0;
+            state      <= ST_IDLE;
+            op_ch      <= 2'd0;
+            op_word    <= 15'h0;
+            op_page    <= 8'h0;
+            op_flush_r <= 1'b0;
         end else begin
-            // page register write: invalidate the entry
-            if (page_we_i) begin
-                page_mem[ch_i] <= page_i;
-                valid_r[ch_i]  <= 1'b0;
-                dirty_r[ch_i]  <= 1'b0;
-                tag_mem[ch_i]  <= 15'h0;
-            end
-
-            // write on hit
-            if (we_i && access_i && hit) begin
+            // write hit
+            if (we_i && access_i && hit && !ack_r) begin
                 data_mem[ch_i] <= wdata_i;
                 dirty_r[ch_i]  <= 1'b1;
             end
@@ -233,22 +198,36 @@ module gpu_cache (
                 dirty_r[flush_ch_i] <= 1'b0;
             end
 
+            // apply a pending page change (entry is clean or invalid)
+            if (issue_apply) begin
+                page_mem[issue_ch] <= pend_page_r[issue_ch];
+                tag_mem[issue_ch]  <= 15'h0;
+                valid_r[issue_ch]  <= 1'b0;
+                dirty_r[issue_ch]  <= 1'b0;
+                pend_r[issue_ch]   <= 1'b0;
+            end
+
+            // page register write: remember it (after the apply above, so a
+            // new request in the same cycle is not lost)
+            if (page_we_i) begin
+                pend_r[ch_i]      <= 1'b1;
+                pend_page_r[ch_i] <= page_i;
+            end
+
             case (state)
                 ST_IDLE: begin
                     if (issue_fill) begin
-                        op_ch        <= issue_ch;
-                        op_word      <= issue_word;
-                        op_page      <= issue_page;
-                        op_we        <= issue_we;
-                        op_wdata     <= issue_wdata;
-                        op_is_access <= issue_is_access;
-                        state        <= ST_FILL;
+                        op_ch      <= issue_ch;
+                        op_word    <= word_i;
+                        op_page    <= page_mem[ch_i];
+                        op_flush_r <= 1'b0;
+                        state      <= ST_FILL;
                     end else if (issue_wb) begin
-                        op_ch        <= issue_ch;
-                        op_word      <= issue_word;
-                        op_page      <= issue_page;
-                        op_is_access <= 1'b0;
-                        state        <= ST_WRITEBACK;
+                        op_ch      <= issue_ch;
+                        op_word    <= tag_mem[issue_ch];     // OLD word
+                        op_page    <= page_mem[issue_ch];    // OLD page
+                        op_flush_r <= issue_flush;
+                        state      <= ST_WRITEBACK;
                     end
                 end
 
@@ -257,18 +236,15 @@ module gpu_cache (
                         tag_mem[op_ch]  <= op_word;
                         data_mem[op_ch] <= wb_dat_i;
                         valid_r[op_ch]  <= 1'b1;
-                        if (op_we) begin
-                            data_mem[op_ch] <= op_wdata;
-                            dirty_r[op_ch]  <= 1'b1;
-                        end
-                        state <= ST_IDLE;
+                        dirty_r[op_ch]  <= 1'b0;
+                        state           <= ST_IDLE;
                     end
                 end
 
                 ST_WRITEBACK: begin
                     if (wb_ack_i) begin
                         dirty_r[op_ch] <= 1'b0;
-                        if (flush_en_i && flush_ch_i == op_ch) valid_r[op_ch] <= 1'b0;
+                        if (op_flush_r) valid_r[op_ch] <= 1'b0;
                         state <= ST_IDLE;
                     end
                 end

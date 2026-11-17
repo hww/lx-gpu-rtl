@@ -105,7 +105,7 @@ static uint16_t do_access(uint8_t ch, uint16_t word, int we, uint16_t wdata,
     if (hit_out) *hit_out = dut->hit_o;
 
     int timeout = 100;
-    while (!dut->access_done_o && timeout-- > 0) tick();
+    while (!dut->ack_o && timeout-- > 0) tick();
 
     uint16_t r = dut->rdata_o;
     dut->access_i = 0;
@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
         dut->access_i = 1; dut->we_i = 1; dut->wdata_i = 0xABCD;
         tick();
         int to = 100;
-        while (!dut->access_done_o && to-- > 0) tick();
+        while (!dut->ack_o && to-- > 0) tick();
         dut->access_i = 0; dut->we_i = 0;
         tick();
         // not yet in WB (still in cache, dirty)
@@ -203,7 +203,7 @@ int main(int argc, char** argv) {
         dut->access_i = 1; dut->we_i = 1; dut->wdata_i = 0x1111;
         tick();
         int to = 100;
-        while (!dut->access_done_o && to-- > 0) tick();
+        while (!dut->ack_o && to-- > 0) tick();
         dut->access_i = 0; dut->we_i = 0;
         tick();
         int hit = -1;

@@ -188,8 +188,8 @@ static void step() {
     if (g_verbose && dut->wb_cyc_o && dut->wb_stb_o) {
         uint32_t addr = (dut->wb_adr_o >> 1) & (MEM_WORDS - 1);
         // Достаем IDX и STEP из pixel_engine (канал 0)
-        uint32_t idx_cur  = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__idx_step_mem[0];
-        uint32_t step_cur = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__idx_step_mem[1];
+        uint32_t idx_cur  = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__reg_idx;
+        uint32_t step_cur = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__reg_step;
         printf("[WB] %s adr=0x%04X dat=0x%04X (IDX=0x%05X STEP=0x%05X)\n",
                dut->wb_we_o ? "WR" : "RD",
                (unsigned)dut->wb_adr_o,
@@ -512,6 +512,14 @@ int main(int argc, char** argv) {
     uint64_t run_start = cycles;
     uint64_t last_prog = cycles;
     int timeout = 0;
+    
+    while (dut->halted_o) {
+        step();
+        if ((cycles - run_start) >= max_cycles) {
+            timeout = 1;
+            break;
+        }
+    }
 
     while (!dut->halted_o && !dut->error_o) {
         step();

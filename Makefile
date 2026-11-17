@@ -58,14 +58,15 @@ sim-top-alu-v: top
 
 sim-top-sprite: top
 	./$(BUILD)/sim_top/Vtop \
+	    -trace \
 		-prog sim/test_sprite.asm -gpuaddr 32 \
 		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0400 \
 		-out images/output.png
 
 sim-top-sprite-v: top
 	./$(BUILD)/sim_top/Vtop \
-	    -v \
-		-prog sim/test_sprite.asm -gpuaddr 32 \
+	    -v -trace \
+		-prog sim/test_sprite.asm -gpuaddr 32 -maxcycles 30000 \
 		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0400 \
 		-out images/output.png	
 

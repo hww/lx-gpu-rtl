@@ -17,7 +17,9 @@ module channel_unit (
     input  logic        step_we_i,
     input  logic        modepage_we_i,
     input  logic [15:0] wdata_i,
-
+    output logic        preload_busy_o,   // 1, пока идёт preload канала 0
+    output logic        preload_done_o, 
+    
     // Доступ к DATA (от процессора)
     input  logic        data_req_i,
     input  logic        data_we_i,
@@ -47,6 +49,8 @@ module channel_unit (
     logic [2:0]  pe_mode;
     logic        pe_prefetch;
     logic        pe_access_done;
+    logic        pe_page_ovf;      // NEW
+    logic        pe_idx_valid;     // NEW
 
     // --- Сигналы от gpu_cache ---
     logic [23:0] cache_addr24;
@@ -63,46 +67,73 @@ module channel_unit (
     logic [15:0] pe_idx_val, pe_step_val;
     logic        cache_page_we;
     logic [7:0]  cache_page_val;
+    
+    // =====================================================================
+    // preload: два такта, чтобы IDX и STEP не конфликтовали за порт BRAM.
+    // MODE и PAGE пишутся в FF (не в BRAM) — их можно писать вместе с IDX.
+    // =====================================================================
+
+    logic pl_start, pl_step;
+
+    always_ff @(posedge clk) begin
+        if (rst) pl_step <= 1'b0;
+        else     pl_step <= pl_start;
+        pl_start <= preload_i & ~rst;
+    end
+
+    assign preload_done_o = pl_step;
+    assign preload_busy_o = pl_start | pl_step;
+
+    // =====================================================================
+    // 
+    // =====================================================================    
+    
+    logic [1:0] ch_sel;
+    assign ch_sel = (pl_start || pl_step) ? 2'd0 : ch_i;
 
     always_comb begin
-        // По умолчанию берем данные от процессора
-        // По умолчанию берем данные от процессора
+        // по умолчанию — процессор
         pe_mode_we  = modepage_we_i;
-        pe_mode_val = wdata_i[10:8];  // FMT (MODE) - биты 10..8
-        
+        pe_mode_val = wdata_i[10:8];
+
         pe_idxh_we  = idxh_we_i;
         pe_idxh_val = wdata_i[2:0];
-        
+
         pe_idx_we   = idx_we_i;
         pe_idx_val  = wdata_i;
-        
+
         pe_step_we  = step_we_i;
         pe_step_val = wdata_i;
-        
-        // PAGE - это биты 7..0
-        cache_page_we  = modepage_we_i; 
+
+        cache_page_we  = modepage_we_i;
         cache_page_val = wdata_i[7:0];
 
-        // Если пришел старт от хоста — принудительно настраиваем канал 0
-        if (preload_i) begin
-            pe_mode_we  = 1'b1;
-            pe_mode_val = 3'd4;     // FMT = 4 (16bpp)
-            
+        // такт 1 preload: MODE=4 (16bpp), PAGE, IDX = addr[15:1]
+        // MODE и IDX одновременно — k уже = 0, сдвиг не нужен
+        if (pl_start) begin
+            pe_mode_we    = 1'b1;
+            pe_mode_val   = 3'd4;
+            cache_page_we = 1'b1;
+            cache_page_val = preload_addr_i[23:16];
+            pe_idx_we     = 1'b1;
+            pe_idx_val    = {1'b0, preload_addr_i[15:1]};
+        end
+
+        // такт 2 preload: STEP = 16 (1 слово)
+        if (pl_step) begin
             pe_step_we  = 1'b1;
-            pe_step_val = 16'd16;   // STEP = 1 слово
-            
-            pe_idx_we   = 1'b1;
-            pe_idx_val  = {1'b0, preload_addr_i[15:1]}; // Адрес в словах
-            
-            cache_page_we  = 1'b1;
-            cache_page_val = preload_addr_i[23:16]; // PAGE
+            pe_step_val = 16'd16;
         end
     end
+
+
+   logic ch_access;
+    assign ch_access = data_req_i && pe_idx_valid;
 
     // --- Инстанс pixel_engine ---
     pixel_engine u_pe (
         .clk(clk), .rst(rst),
-        .ch_i(ch_i),
+        .ch_i(ch_sel),
         .mode_we_i(pe_mode_we), .mode_i(pe_mode_val),
         .idxh_we_i(pe_idxh_we), .idxh_i(pe_idxh_val),
         .idx_we_i(pe_idx_we),   .idx_i(pe_idx_val),
@@ -112,15 +143,17 @@ module channel_unit (
         .word_o(pe_word),
         .pos_o(pe_pos),
         .mode_o(pe_mode),
-        .prefetch_o(pe_prefetch)
+        .page_ovf_o(pe_page_ovf),
+        .prefetch_o(pe_prefetch),
+        .idx_valid_o(pe_idx_valid)
     );
 
     // --- Инстанс gpu_cache ---
     gpu_cache u_cache (
         .clk(clk), .rst(rst),
-        .ch_i(ch_i),
+        .ch_i(ch_sel),
         .word_i(pe_word),
-        .access_i(data_req_i),
+        .access_i(ch_access),
         .prefetch_i(pe_prefetch),
         .we_i(data_we_i),
         .wdata_i(wdata_i),
@@ -149,7 +182,9 @@ module channel_unit (
     assign data_ack_o     = cache_ack;
     assign data_rdata_o   = cache_rdata;
     assign flush_ack_o    = cache_flush_done;
-    assign status_o       = {3'b0, cache_error};
-    assign error_o        = cache_error;
+    assign status_o       = {2'b0, pe_page_ovf, cache_error};
+    assign error_o        = cache_error | pe_page_ovf;
 
+
+    
 endmodule
