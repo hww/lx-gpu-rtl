@@ -1,4 +1,4 @@
-// tools/asm.h — ассемблер LX-GPU
+// tools/asm.h — ассемблер LX-GPU (использует только tools/isa.h)
 #pragma once
 #include "isa.h"
 #include <cstdlib>
@@ -35,6 +35,7 @@ static inline long asm_parse_int(const std::string& s) {
 static inline uint32_t asm_line(const std::string& raw,
                                 std::map<std::string,int>& labels,
                                 int cur_pc, int* ok) {
+    using namespace isa;
     *ok = 0;
     std::string line = asm_trim(asm_strip_comment(raw));
     if (line.empty()) return 0;
@@ -88,128 +89,154 @@ static inline uint32_t asm_line(const std::string& raw,
         return (uint32_t)asm_parse_int(args[0]);
     }
 
-    // ---- CTRL ----
+    // ================================================================
+    // CTRL-класс (J=1, I=0)
+    // ================================================================
+    auto enc_ctrl = [&](uint32_t op, uint32_t addr_or_src, uint32_t r_bit) {
+        return enc_field(L, L_LO, L_HI)
+             | enc_field(1, J_LO, J_HI)
+             | enc_field(0, I_LO, I_HI)
+             | enc_field(cond, COND_LO, COND_HI)
+             | enc_field(0, WRITE_LO, WRITE_HI)
+             | enc_field(0, F_LO, F_HI)
+             | enc_field(0, DST_LO, DST_HI)
+             | enc_field(r_bit, R_LO, R_HI)
+             | enc_field(op, CTRLOP_LO, CTRLOP_HI)
+             | enc_field(addr_or_src, ADDR_LO, ADDR_HI);
+    };
+
     if (mn == "JMP" || mn == "CALL") {
         if (args.size() != 1) return 0;
+        uint32_t op = (mn == "JMP") ? isa::CTRL_JMP : isa::CTRL_CALL;
         int rr = reg_code(args[0]);
-        uint32_t op = (mn == "JMP") ? 1 : 2;
         if (rr >= 0) {
-            uint32_t w = enc_field(L,31,31) | enc_field(1,30,30) | enc_field(0,29,29)
-                       | enc_field(cond,28,25) | enc_field(0,24,24) | enc_field(0,23,23)
-                       | enc_field(0,22,17) | enc_field(1,16,16)
-                       | enc_field(op,15,12) | enc_field((uint32_t)rr,11,6);
+            // JMP/CALL по регистру: R=1, SRC в [11:6]
+            uint32_t w = enc_field(L, L_LO, L_HI)
+                       | enc_field(1, J_LO, J_HI)
+                       | enc_field(0, I_LO, I_HI)
+                       | enc_field(cond, COND_LO, COND_HI)
+                       | enc_field(0, WRITE_LO, WRITE_HI)
+                       | enc_field(0, F_LO, F_HI)
+                       | enc_field(0, DST_LO, DST_HI)
+                       | enc_field(1, R_LO, R_HI)
+                       | enc_field(op, CTRLOP_LO, CTRLOP_HI)
+                       | enc_field((uint32_t)rr, SRC_LO, SRC_HI);
             *ok = 1; return w;
         }
-        uint32_t addr;
-        if (labels.count(args[0])) addr = (uint32_t)labels[args[0]];
-        else addr = (uint32_t)asm_parse_int(args[0]);
-        uint32_t w = enc_field(L,31,31) | enc_field(1,30,30) | enc_field(0,29,29)
-                   | enc_field(cond,28,25) | enc_field(0,24,24) | enc_field(0,23,23)
-                   | enc_field(0,22,17) | enc_field(0,16,16)
-                   | enc_field(op,15,12) | enc_field(addr,11,0);
-        *ok = 1; return w;
-    }
-    if (mn == "HALT" || mn == "IRQ" || mn == "FLUSH") {
-        uint32_t op = (mn == "HALT") ? 4 : (mn == "IRQ") ? 5 : 6;
-        uint32_t code = 0;
-        if (!args.empty()) {
-            if (labels.count(args[0])) code = (uint32_t)labels[args[0]];
-            else code = (uint32_t)asm_parse_int(args[0]);
-        }
-        uint32_t w = enc_field(L,31,31) | enc_field(1,30,30) | enc_field(0,29,29)
-                   | enc_field(cond,28,25) | enc_field(0,24,24) | enc_field(0,23,23)
-                   | enc_field(0,22,17) | enc_field(0,16,16)
-                   | enc_field(op,15,12) | enc_field(code,11,0);
-        *ok = 1; return w;
-    }
-    if (mn == "RET" || mn == "NOP") {
-        uint32_t op = (mn == "RET") ? 3 : 0;
-        uint32_t w = enc_field(L,31,31) | enc_field(1,30,30) | enc_field(0,29,29)
-                   | enc_field(cond,28,25) | enc_field(0,24,24) | enc_field(0,23,23)
-                   | enc_field(0,22,17) | enc_field(0,16,16)
-                   | enc_field(op,15,12);
-        *ok = 1; return w;
+        uint32_t addr = labels.count(args[0])
+                      ? (uint32_t)labels[args[0]]
+                      : (uint32_t)asm_parse_int(args[0]);
+        *ok = 1;
+        return enc_ctrl(op, addr & 0xFFF, 0);
     }
 
-    // ---- LDI ----
+    if (mn == "HALT" || mn == "IRQ" || mn == "FLUSH") {
+        uint32_t op = (mn == "HALT")  ? isa::CTRL_HALT
+                    : (mn == "IRQ")   ? isa::CTRL_IRQ
+                                      : isa::CTRL_FLUSH;
+        uint32_t code = 0;
+        if (!args.empty()) {
+            code = labels.count(args[0])
+                 ? (uint32_t)labels[args[0]]
+                 : (uint32_t)asm_parse_int(args[0]);
+        }
+        *ok = 1;
+        return enc_ctrl(op, code & 0xFFF, 0);
+    }
+
+    if (mn == "RET" || mn == "NOP") {
+        uint32_t op = (mn == "RET") ? isa::CTRL_RET : isa::CTRL_NOP;
+        *ok = 1;
+        return enc_ctrl(op, 0, 0);
+    }
+
+    // ================================================================
+    // LDI-класс (J=0, I=1): LDI dst, #imm16
+    //   RTL принудительно ставит WRITE=1, F=0 для LDI
+    // ================================================================
     if (mn == "LDI") {
         if (args.size() != 2) return 0;
         int dst = reg_code(args[0]);
         if (dst < 0 || args[1].empty() || args[1][0] != '#') return 0;
-        uint32_t imm = (uint32_t)asm_parse_int(args[1].substr(1));
-        uint32_t w = enc_field(L,31,31) | enc_field(0,30,30) | enc_field(1,29,29)
-                   | enc_field(cond,28,25) | enc_field(1,24,24) | enc_field(0,23,23)
-                   | enc_field((uint32_t)dst,22,17)
-                   | enc_field(imm,15,0);
+        uint32_t imm = (uint32_t)asm_parse_int(args[1].substr(1)) & 0xFFFF;
+        uint32_t w = enc_field(L, L_LO, L_HI)
+                   | enc_field(0, J_LO, J_HI)
+                   | enc_field(1, I_LO, I_HI)
+                   | enc_field(cond, COND_LO, COND_HI)
+                   | enc_field(1, WRITE_LO, WRITE_HI)
+                   | enc_field(0, F_LO, F_HI)
+                   | enc_field((uint32_t)dst, DST_LO, DST_HI)
+                   | enc_field(imm, IMM16_LO, IMM16_HI);
         *ok = 1; return w;
     }
 
-    // ---- ALU ----
-    uint32_t op = 0;
+    // ================================================================
+    // ALU-класс: имя операции ищем в ALU_NAMES (единственный источник)
+    // ================================================================
+    int op_idx = alu_code(mn);
+    if (op_idx < 0) return 0;
+
     uint32_t write = 1, f = 0;
-    if (mn == "MOV")       { op = 0x00; f = 0; }
-    else if (mn == "MVN")  { op = 0x01; f = 0; }
-    else if (mn == "AND")  { op = 0x02; f = 1; }
-    else if (mn == "BIC")  { op = 0x03; f = 1; }
-    else if (mn == "OR")   { op = 0x04; f = 1; }
-    else if (mn == "ORN")  { op = 0x05; f = 1; }
-    else if (mn == "XOR")  { op = 0x06; f = 1; }
-    else if (mn == "XNOR") { op = 0x07; f = 1; }
-    else if (mn == "ADD")  { op = 0x08; f = 1; }
-    else if (mn == "ADC")  { op = 0x09; f = 1; }
-    else if (mn == "SUB")  { op = 0x0A; f = 1; }
-    else if (mn == "SBC")  { op = 0x0B; f = 1; }
-    else if (mn == "ROR")  { op = 0x0C; f = 1; }
-    else if (mn == "SHR")  { op = 0x0D; f = 1; }
-    else if (mn == "SAR")  { op = 0x0E; f = 1; }
-    else if (mn == "MUL")  { op = 0x18; f = 1; }
-    else if (mn == "TST")  { op = 0x1A; f = 1; write = 0; }
-    else if (mn == "CMP")  { op = 0x1B; f = 1; write = 0; }
-    else return 0;
+    if (mn == "TST" || mn == "CMP") write = 0;
+    if (mn == "AND" || mn == "BIC" || mn == "OR"  || mn == "ORN" ||
+        mn == "XOR" || mn == "XNOR"|| mn == "ADD" || mn == "ADC" ||
+        mn == "SUB" || mn == "SBC" || mn == "ROR" || mn == "SHR" ||
+        mn == "SAR" || mn == "MUL" || mn == "TST" || mn == "CMP")
+        f = 1;
 
     if (args.size() != 2) return 0;
     int dst = reg_code(args[0]);
     if (dst < 0) return 0;
-
     if (args[1].empty()) return 0;
+
     if (args[1][0] == '#') {
+        // REG-IMM11 (J=1, I=1)
         long val = asm_parse_int(args[1].substr(1));
         if (val < -1024 || val > 1023) {
             fprintf(stderr, "asm: imm11 %ld out of range\n", val);
             return 0;
         }
-        uint32_t sx = (val < 0) ? 1 : 0;
+        uint32_t sx  = (val < 0) ? 1u : 0u;
         uint32_t imm = (uint32_t)(val & 0x7FF);
-        uint32_t w = enc_field(L,31,31) | enc_field(1,30,30) | enc_field(1,29,29)
-                   | enc_field(cond,28,25) | enc_field(write,24,24) | enc_field(f,23,23)
-                   | enc_field((uint32_t)dst,22,17) | enc_field(op,16,12)
-                   | enc_field(sx,11,11) | enc_field(imm,10,0);
+        uint32_t w = enc_field(L, L_LO, L_HI)
+                   | enc_field(1, J_LO, J_HI)
+                   | enc_field(1, I_LO, I_HI)
+                   | enc_field(cond, COND_LO, COND_HI)
+                   | enc_field(write, WRITE_LO, WRITE_HI)
+                   | enc_field(f, F_LO, F_HI)
+                   | enc_field((uint32_t)dst, DST_LO, DST_HI)
+                   | enc_field((uint32_t)op_idx, OP_LO, OP_HI)
+                   | enc_field(sx, SX_LO, SX_HI)
+                   | enc_field(imm, IMM11_LO, IMM11_HI);
         *ok = 1; return w;
     } else {
+        // REG-REG (J=0, I=0)
         int src = reg_code(args[1]);
         if (src < 0) return 0;
-        uint32_t w = enc_field(L,31,31) | enc_field(0,30,30) | enc_field(0,29,29)
-                   | enc_field(cond,28,25) | enc_field(write,24,24) | enc_field(f,23,23)
-                   | enc_field((uint32_t)dst,22,17) | enc_field(op,16,12)
-                   | enc_field((uint32_t)src,11,6);
+        uint32_t w = enc_field(L, L_LO, L_HI)
+                   | enc_field(0, J_LO, J_HI)
+                   | enc_field(0, I_LO, I_HI)
+                   | enc_field(cond, COND_LO, COND_HI)
+                   | enc_field(write, WRITE_LO, WRITE_HI)
+                   | enc_field(f, F_LO, F_HI)
+                   | enc_field((uint32_t)dst, DST_LO, DST_HI)
+                   | enc_field((uint32_t)op_idx, OP_LO, OP_HI)
+                   | enc_field((uint32_t)src, SRC_LO, SRC_HI);
         *ok = 1; return w;
     }
 }
 
-// ---------- сборка массива строк в массив слов (2 прохода: метки, затем инструкции) ----------
+// ---------- сборка массива строк в массив слов (2 прохода) ----------
 static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>& lines) {
     std::map<std::string,int> labels;
     std::vector<uint32_t> words;
-    
-    // ==========================================
-    // Проход 1: Собираем метки с учётом .org
-    // ==========================================
+
+    // ---- проход 1: метки + .org ----
     int pc = 0;
     for (auto& raw : lines) {
         std::string line = asm_trim(asm_strip_comment(raw));
         if (line.empty()) continue;
 
-        // Обработка метки
         size_t colon = line.find(':');
         if (colon != std::string::npos) {
             std::string label = asm_trim(line.substr(0, colon));
@@ -218,17 +245,13 @@ static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>&
             if (line.empty()) continue;
         }
 
-        // Обработка .org
         if (line.rfind(".org", 0) == 0 || line.rfind(".ORG", 0) == 0) {
-            std::string arg = asm_trim(line.substr(4));
-            pc = (int)asm_parse_int(arg);
+            pc = (int)asm_parse_int(asm_trim(line.substr(4)));
             continue;
         }
 
-        // Обработка .word
         if (line.rfind(".word", 0) == 0 || line.rfind(".WORD", 0) == 0) {
             std::string arg = asm_trim(line.substr(5));
-            // .word может содержать несколько значений через запятую
             std::string cur;
             for (char c : arg) {
                 if (c == ',') { pc++; cur.clear(); }
@@ -238,38 +261,28 @@ static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>&
             continue;
         }
 
-        // Обычная инструкция (или L-префикс)
-        // Если это не .org и не .word, значит инструкция занимает 1 слово
         int ok = 0;
         asm_line(line, labels, pc, &ok);
         if (ok) pc++;
     }
 
-    // ==========================================
-    // Проход 2: Генерируем код с учётом .org
-    // ==========================================
+    // ---- проход 2: код + .org ----
     for (auto& raw : lines) {
         std::string line = asm_trim(asm_strip_comment(raw));
         if (line.empty()) continue;
 
-        // Пропускаем метки
         size_t colon = line.find(':');
         if (colon != std::string::npos) {
             line = asm_trim(line.substr(colon + 1));
             if (line.empty()) continue;
         }
 
-        // Обработка .org — заполняем нулями до нужного адреса
         if (line.rfind(".org", 0) == 0 || line.rfind(".ORG", 0) == 0) {
-            std::string arg = asm_trim(line.substr(4));
-            int target = (int)asm_parse_int(arg);
-            while (words.size() < (size_t)target) {
-                words.push_back(0);
-            }
+            int target = (int)asm_parse_int(asm_trim(line.substr(4)));
+            while (words.size() < (size_t)target) words.push_back(0);
             continue;
         }
 
-        // Обработка .word
         if (line.rfind(".word", 0) == 0 || line.rfind(".WORD", 0) == 0) {
             std::string arg = asm_trim(line.substr(5));
             std::string cur;
@@ -277,14 +290,12 @@ static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>&
                 if (c == ',') {
                     words.push_back((uint32_t)asm_parse_int(cur));
                     cur.clear();
-                }
-                else cur += c;
+                } else cur += c;
             }
             if (!cur.empty()) words.push_back((uint32_t)asm_parse_int(cur));
             continue;
         }
 
-        // Обычная инструкция
         int ok = 0;
         uint32_t w = asm_line(line, labels, (int)words.size(), &ok);
         if (ok) words.push_back(w);
@@ -293,7 +304,7 @@ static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>&
     return words;
 }
 
-// ---------- вспомогательное: собрать .asm файл в слова ----------
+// ---------- .asm файл -> слова ----------
 static inline std::vector<uint32_t> asm_assemble_file(const char* path, uint16_t* out_org = nullptr) {
     std::vector<std::string> lines;
     FILE* fp = fopen(path, "r");
@@ -302,14 +313,12 @@ static inline std::vector<uint32_t> asm_assemble_file(const char* path, uint16_t
     while (fgets(buf, sizeof buf, fp)) lines.push_back(buf);
     fclose(fp);
 
-    // Проверяем, есть ли начальный .org до первой инструкции
     int initial_org = -1;
     for (auto& raw : lines) {
         std::string line = asm_trim(asm_strip_comment(raw));
         if (line.empty()) continue;
-        if (line.rfind(".org", 0) == 0 || line.rfind(".ORG", 0) == 0) {
+        if (line.rfind(".org", 0) == 0 || line.rfind(".ORG", 0) == 0)
             initial_org = (int)asm_parse_int(asm_trim(line.substr(4)));
-        }
         break;
     }
 
@@ -317,7 +326,6 @@ static inline std::vector<uint32_t> asm_assemble_file(const char* path, uint16_t
 
     if (initial_org > 0 && (size_t)initial_org <= words.size()) {
         if (out_org) *out_org = (uint16_t)initial_org;
-        // Отрезаем ведущие нули, т.к. смещение задаётся полем START в заголовке пакета
         words.erase(words.begin(), words.begin() + initial_org);
     }
     return words;

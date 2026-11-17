@@ -39,14 +39,19 @@ top: asm $(wildcard tools/*.h) | $(BUILD)
 		-CFLAGS "-I$(CURDIR)/tools -I$(CURDIR)/third_party/stb -I$(CURDIR)/sim" \
 		-Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE -Wno-UNOPTFLAT \
 		--trace \
+		--public-flat-rw \
 		--top-module top \
 		-Mdir $(CURDIR)/$(BUILD)/sim_top \
-		rtl/alu.sv rtl/regfile.sv rtl/sequencer.sv rtl/microcode_rom.sv \
-		rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/top.sv \
+		rtl/alu.sv rtl/regfile.sv rtl/cond_eval.sv rtl/fetch_unit.sv rtl/microcode_rom.sv \
+		rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/channel_unit.sv \
+		rtl/top.sv \
 		$(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
 
 sim-top: top
-	./$(BUILD)/sim_top/Vtop -prog sim/test_sprite.asm -gpuaddr 32
+	./$(BUILD)/sim_top/Vtop -trace -prog sim/test_sprite.asm -gpuaddr 32
+
+sim-top-v: top
+	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_sprite.asm -gpuaddr 32
 
 # ---- остальные sim-* (модульные тесты) ----
 sim-alu: | $(BUILD)
@@ -85,6 +90,26 @@ sim-gpu-cache: | $(BUILD)
 	    rtl/gpu_cache.sv $(CURDIR)/sim/tb_gpu_cache.cpp
 	./$(BUILD)/sim_gpu_cache/Vgpu_cache
 
+
+sim-fetch: | $(BUILD)
+	mkdir -p $(BUILD)/tb_fetch_unit
+	verilator --cc --exe --build -j 1 -DSIMULATION \
+	    -CFLAGS "-I$(CURDIR)/tools" \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module fetch_unit -Mdir $(CURDIR)/$(BUILD)/tb_fetch_unit \
+	    rtl/fetch_unit.sv  rtl/cond_eval.sv $(CURDIR)/sim/tb_fetch_unit.cpp
+	./$(BUILD)/tb_fetch_unit/Vfetch_unit
+
+sim-cond: | $(BUILD)
+	mkdir -p $(BUILD)/cond_eval
+	verilator --cc --exe --build -j 1 -DSIMULATION \
+	    -CFLAGS "-I$(CURDIR)/tools" \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module cond_eval -Mdir $(CURDIR)/$(BUILD)/cond_eval \
+	    rtl/cond_eval.sv $(CURDIR)/sim/tb_cond_eval.cpp
+	./$(BUILD)/cond_eval/Vcond_eval
+
+
 sim-channel: | $(BUILD)
 	mkdir -p $(BUILD)/sim_channel
 	verilator --cc --exe --build -j 1 -DSIMULATION \
@@ -94,6 +119,16 @@ sim-channel: | $(BUILD)
 	    rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv \
 	    sim/tb_channel.sv $(CURDIR)/sim/tb_channel.cpp
 	./$(BUILD)/sim_channel/Vtb_channel
+	
+sim-ch: | $(BUILD)
+	mkdir -p $(BUILD)/tb_channel_unit
+	verilator --cc --exe --build -j 1 -DSIMULATION \
+	    -CFLAGS "-I$(CURDIR)/tools" \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module channel_unit -Mdir $(CURDIR)/$(BUILD)/tb_channel_unit \
+	    rtl/channel_unit.sv rtl/pixel_engine.sv rtl/gpu_cache.sv \
+	    $(CURDIR)/sim/tb_channel_unit.cpp
+	./$(BUILD)/tb_channel_unit/Vchannel_unit
 
 # ================================================================
 # synth / pnr / bit (без asm/pack)
@@ -124,7 +159,6 @@ clean:
 
 sprite: top
 	./$(BUILD)/sim_top/Vtop \
-	    -v \
 		-prog sim/test_sprite.asm -gpuaddr 32 \
 		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0200 \
 		-out images/output.png

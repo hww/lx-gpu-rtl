@@ -93,7 +93,7 @@ module tb_channel (
         .wdata_i(gc_wdata_i),
         .hit_o(gc_hit),
         .rdata_o(gc_rdata),
-        .access_done_o(gc_access_done_o),
+        .ack_o(gc_access_done_o),
         .page_we_i(gc_page_we_i),
         .page_i(gc_page_i),
         .page_o(gc_page_o),

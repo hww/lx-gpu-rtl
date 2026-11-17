@@ -33,10 +33,13 @@ module microcode_rom #(
 );
 
     (* no_rw_check *)
-    logic [DATA_W-1:0] mem [0:DEPTH-1] /*verilator public_flat*/;
+    logic [DATA_W-1:0] mem [0:DEPTH-1] /* verilator public_flat_rw */;
 
     initial begin
         for (int i = 0; i < DEPTH; i++) mem[i] = '0;
+`ifdef SIMULATION
+        if (INIT_FILE != "") $readmemh(INIT_FILE, mem);
+`endif
     end
 
     always_ff @(posedge clk) begin

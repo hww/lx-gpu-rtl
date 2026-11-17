@@ -1,9 +1,8 @@
 // sim/main_top.cpp — top.sv test (Vtop, без tb_top_wrapper)
 #include "Vtop.h"
+#include "Vtop___024root.h"     // ← вернуть, он нужен для rootp
 #include "verilated.h"
 #include "verilated_vcd_c.h"
-#include "Vtop___024root.h"
-#include "Vtop_top.h"
 #include "image_io.h"
 #include "disasm.h"
 #include "asm.h"
@@ -42,23 +41,29 @@ static bool load_file_smart(const char* path, uint32_t mem_off, uint32_t gpu_add
     std::string ext = (dot != std::string::npos) ? p.substr(dot) : "";
 
     if (ext == ".asm") {
-        printf("Loading ASM file...\n");
-        uint16_t asm_org = 0x0020;
+        printf("Loading ASM file to Z80 memory...\n");
+         uint16_t asm_org = 0; // Инициализируем нулем, ассемблер сам заполнит
         auto words = asm_assemble_file(path, &asm_org);
         if (words.empty()) { fprintf(stderr, "asm empty or error\n"); return false; }
-
-        uint16_t start_addr = has_gpu_addr ? (uint16_t)gpu_addr : asm_org;
+        
+        // Z80 memory address
         uint32_t a = mem_off;
+
+        // GPU Memiry address
+        // Если в файле не было .org, asm_org останется 0. 
+        // Если был - он будет равен значению из .org (например, 0x20 или 0x100).
+        printf("  ASM org = 0x%04X\n", asm_org);
+        uint16_t gpu_start_addr = has_gpu_addr ? (uint16_t)gpu_addr : asm_org;
+
+        // Fill memory with file
         mem[a++] = (uint16_t)((words.size() * 2) & 0xFFFF); // SIZE
-        mem[a++] = start_addr;                              // START
-        uint32_t gpu_pc = start_addr;
+        mem[a++] = gpu_start_addr;                              // START
+        uint32_t gpu_pc = gpu_start_addr;
         for (auto w : words) {
             mem[a++] = (uint16_t)(w & 0xFFFF);
             mem[a++] = (uint16_t)((w >> 16) & 0xFFFF);
-            printf("  [%04X] %08X  %s\n", gpu_pc++, w, disasm32(w));
+            printf("  Z80_RAM[%04X] GPU_ROM[%04X] %08X  %s\n", a, gpu_pc++, w, disasm32(w));
         }
-        printf("loaded %s (.asm) -> assembled %zu words -> pkg @ RAM 0x%04X (GPU START=0x%04X)\n",
-               path, words.size(), mem_off, start_addr);
         return true;
 
     } else if (ext == ".pkg") {
@@ -132,9 +137,8 @@ static void dump_rom_hex(const char* tag, uint32_t word_off, uint32_t nwords) {
         printf("  %03X:", word_off + i);
         for (uint32_t j = 0; j < 4 && i + j < nwords; j++) {
             uint32_t w = word_off + i + j;
-            uint32_t v = (w < ROM_SIZE)
-                ? (uint32_t)dut->rootp->top->u_rom__DOT__mem[w]
-                : 0;
+            uint32_t v = (w < ROM_SIZE) ? (uint32_t)dut->rootp->top__DOT__u_rom__DOT__mem[w] : 0;
+
             printf(" %08X", v);
         }
         printf("\n");
@@ -149,8 +153,8 @@ static void tick(int clk, bool log) {
     ++cycles;
 
     if (log && g_verbose) {
-        uint32_t insn = (uint32_t)dut->rootp->top->rom_fetch_data;
-        printf("t=%llu pc=%03X halted=%d error=%d insn=%08X  %s\n",
+        uint32_t insn = (uint32_t)dut->rootp->top__DOT__rom_fetch_data;
+        printf("[dbg] t=%llu pc=%03X halted=%d error=%d insn=%08X  %s\n",
             (unsigned long long)cycles,
             (unsigned)dut->pc_o,
             (int)dut->halted_o, (int)dut->error_o,
@@ -232,7 +236,7 @@ static void load_hex_into_rom(const char* path) {
 
     // записать в ROM через иерархию (Verilator public)
     for (uint32_t i = 0; i < ROM_SIZE; i++)
-        dut->rootp->top->u_rom__DOT__mem[i] = rom[i];
+        dut->rootp->top__DOT__u_rom__DOT__mem[i] = rom[i];
 }
 
 // ===== RAM loader =====
@@ -320,6 +324,7 @@ static std::string make_default_out_path(const char* in_path) {
 // ===== main =====
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    printf("DEBUG argc=%d\n", argc);
     dut = new Vtop;
 
     // ===== args =====
@@ -394,6 +399,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "-trace"))    trace     = 1;
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 1; }
     }
+    
+    printf("DEBUG g_verbose=%d\n", g_verbose);
 
     // Если входной -din задан, а -out не указан — генерируем имя *_out.png автоматически,
     // чтобы не перезаписывать исходный файл din_path
@@ -430,7 +437,7 @@ int main(int argc, char** argv) {
     header("ROM BOOTLOADER");
     load_hex_into_rom("rtl/bootloader.hex");
     {
-        uint32_t r0 = dut->rootp->top->u_rom__DOT__mem[0];
+        uint32_t r0 = dut->rootp->top__DOT__u_rom__DOT__mem[0];
         check_nonzero("rom[0] loaded", r0, 32);
         printf("  rom[0] = %08X  %s\n", r0, disasm32(r0));
     }
@@ -464,7 +471,7 @@ int main(int argc, char** argv) {
     header("GPU_START");
     // Если загружен пакет (.asm/.pkg) — стартовый адрес берётся из заголовка пакета (mem[prog_off + 1]).
     // Если загружен не пакет (.hex) — используем явно переданный -gpuaddr.
-    dut->gpu_addr_i  = is_pkg ? mem[prog_off + 1] : gpu_addr;
+    dut->gpu_addr_i  = (is_pkg ? (prog_off * 2) : gpu_addr) & 0xFFFFFF;
     dut->gpu_start_i = 1; step(); dut->gpu_start_i = 0;
     check_bit("halted after start", dut->halted_o, 0);
     check_eq ("pc after start",     dut->pc_o, 0, 12);
@@ -481,10 +488,10 @@ int main(int argc, char** argv) {
         if (progress_every && (cycles - last_prog) >= progress_every) {
             printf(CLR_YEL "[progress]" CLR_RST " cycles=%llu pc=%03X R0=%04X R1=%04X R2=%04X R3=%04X\n",
                    (unsigned long long)cycles, (unsigned)dut->pc_o,
-                   (unsigned)dut->rootp->top->u_rf__DOT__mem_a[0],
-                   (unsigned)dut->rootp->top->u_rf__DOT__mem_a[1],
-                   (unsigned)dut->rootp->top->u_rf__DOT__mem_a[2],
-                   (unsigned)dut->rootp->top->u_rf__DOT__mem_a[3]);
+                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[0],
+                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[1],
+                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[2],
+                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[3]);
             last_prog = cycles;
         }
 
@@ -501,7 +508,7 @@ int main(int argc, char** argv) {
     printf("  halted  = %d\n", (int)dut->halted_o);
     printf("  error   = %d\n", (int)dut->error_o);
     printf("  pc      = %03X\n", (unsigned)dut->pc_o);
-    printf("  errcode = %03X\n", (unsigned)dut->error_code_o);
+    printf("  errcode = %03X\n", (unsigned)dut->rootp->top__DOT__ch_error);
 
     if (timeout) {
         printf(CLR_RED "  TIMEOUT: %llu cycles exceeded\n" CLR_RST,
@@ -517,17 +524,17 @@ int main(int argc, char** argv) {
         header("CONTEXT AT FAILURE");
         printf("  pc = %03X, R0=%04X R1=%04X R2=%04X R3=%04X\n",
                (unsigned)dut->pc_o,
-               (unsigned)dut->rootp->top->u_rf__DOT__mem_a[0],
-               (unsigned)dut->rootp->top->u_rf__DOT__mem_a[1],
-               (unsigned)dut->rootp->top->u_rf__DOT__mem_a[2],
-               (unsigned)dut->rootp->top->u_rf__DOT__mem_a[3]);
+               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[0],
+               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[1],
+               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[2],
+               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[3]);
         printf("  roma=%03X roml=%04X rom_we=%d\n",
-               (unsigned)dut->rootp->top->__PVT__t_roma_r,
-               (unsigned)dut->rootp->top->__PVT__t_roml_r,
-               (int)dut->rootp->top->__PVT__t_rom_acc_we);
-        printf("  gc: access=%d we=%d\n",
-               (int)dut->rootp->top->__PVT__t_gc_access,
-               (int)dut->rootp->top->__PVT__t_gc_we);
+               (unsigned)dut->rootp->top__DOT__t_roma_r,
+               (unsigned)dut->rootp->top__DOT__t_roml_r,
+               (int)dut->rootp->top__DOT__t_rom_acc_we);
+        printf("  ch: error=%d status=%X\n",
+            (int)dut->rootp->top__DOT__ch_error,
+            (unsigned)dut->rootp->top__DOT__ch_status);
     }
 
     dump_rom_hex("after run 0x00", 0x000, 16);
@@ -537,7 +544,7 @@ int main(int argc, char** argv) {
     printf("\n" CLR_BLD "registers R0..R31:" CLR_RST "\n");
     for (int i = 0; i < 32; i++) {
         printf("  R%02d = %04X\n", i,
-            (unsigned)dut->rootp->top->u_rf__DOT__mem_a[i]);
+            (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[i]);
     }
 
     // ===== Save outputs (исходный din_path остаётся нетронутым) =====
