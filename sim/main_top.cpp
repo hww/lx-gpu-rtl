@@ -383,7 +383,7 @@ int main(int argc, char** argv) {
     const char* out_raw   = nullptr;
 
     // 5. Настройки симулятора
-    uint64_t    max_cycles     = 1000000ULL;
+    uint64_t    max_cycles     = 200000ULL;
     uint64_t    progress_every = 0;
     int         trace          = 0;
 
@@ -517,9 +517,12 @@ int main(int argc, char** argv) {
         step();
         if ((cycles - run_start) >= max_cycles) {
             timeout = 1;
+            printf("Infinitive initial HALT state...");
             break;
         }
     }
+
+    run_start = cycles;
 
     while (!dut->halted_o && !dut->error_o) {
         step();
@@ -535,6 +538,7 @@ int main(int argc, char** argv) {
         }
 
         if ((cycles - run_start) >= max_cycles) {
+            printf("Infinitive execution...");
             timeout = 1;
             break;
         }

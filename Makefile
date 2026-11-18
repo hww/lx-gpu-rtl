@@ -42,13 +42,13 @@ top: asm $(wildcard tools/*.h) | $(BUILD)
 		--public-flat-rw \
 		--top-module top \
 		-Mdir $(CURDIR)/$(BUILD)/sim_top \
-		rtl/alu.sv rtl/regfile.sv rtl/cond_eval.sv rtl/fetch_unit.sv rtl/microcode_rom.sv \
+		rtl/fmt_pkg.sv rtl/alu.sv rtl/regfile.sv rtl/cond_eval.sv rtl/fetch_unit.sv rtl/microcode_rom.sv \
 		rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/channel_unit.sv \
 		rtl/top.sv \
 		$(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
 
 sim-top: top
-	./$(BUILD)/sim_top/Vtop -trace -prog sim/test_sprite.asm -gpuaddr 32
+	./$(BUILD)/sim_top/Vtop -trace -prog sim/test_alu.asm -gpuaddr 32
 
 sim-top-v: top
 	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_sprite.asm -gpuaddr 32
