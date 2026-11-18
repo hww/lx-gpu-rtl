@@ -24,7 +24,12 @@
 //   44..47 DATA[0..3]   48..51 IDX[0..3]   52..55 IDXH[0..3]
 //   56..59 STEP[0..3]   60..63 MODEPAGE[0..3]
 // Special operands as destination: MOV only (assembler rule).
-module gpu_top (
+module gpu_top #(
+    // bootloader image for ROM words 0-31 (the rest is zero); relative to where
+    // the tool runs, so a project that keeps this repository elsewhere (e.g. a
+    // MiSTer core with it as a submodule) passes its own path
+    parameter BOOT_HEX = "boot/bootloader.hex"
+) (
     input  logic        clk,
     input  logic        rst,
 
@@ -195,7 +200,7 @@ module gpu_top (
     // Blocks
     // ================================================================
     core_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
-                    .INIT_FILE("boot/bootloader.hex")) u_rom (
+                    .INIT_FILE(BOOT_HEX)) u_rom (
         .clk(clk),
         .fetch_en_i(adv),
         .fetch_addr_i(fu_pc),
