@@ -151,21 +151,21 @@ module channel_unit (
     // --- Инстанс gpu_cache ---
     gpu_cache u_cache (
         .clk(clk), .rst(rst),
-        .ch_i(ch_sel),
-        .word_i(pe_word),
-        .access_i(ch_access),
-        .prefetch_i(pe_prefetch),
-        .we_i(data_we_i),
-        .wdata_i(wdata_i),
-        .hit_o(cache_hit),
-        .rdata_o(cache_rdata),
+        .ch_sel_i(ch_sel),
+        .ch_addr_i(pe_word),
+        .ch_stb_i(ch_access),
+        .ch_prefetch_i(pe_prefetch),
+        .ch_we_i(data_we_i),
+        .ch_dat_i(wdata_i),
+        .ch_hit_o(cache_hit),
+        .ch_dat_o(cache_rdata),
         .ack_o(cache_ack),
         .page_we_i(cache_page_we),
         .page_i(cache_page_val),
         .page_o(cache_page),
         .flush_en_i(flush_req_i),
-        .flush_ch_i(ch_i),
-        .flush_done_o(cache_flush_done),
+        .flush_sel_i(ch_i),
+        .flush_ack_o(cache_flush_done),
         .wb_cyc_o(wb_cyc_o),
         .wb_stb_o(wb_stb_o),
         .wb_we_o(wb_we_o),
@@ -173,8 +173,7 @@ module channel_unit (
         .wb_dat_o(wb_dat_o),
         .wb_ack_i(wb_ack_i),
         .wb_dat_i(wb_dat_i),
-        .addr24_o(cache_addr24),
-        .error_o(cache_error)
+        .addr24_o(cache_addr24)
     );
 
     // --- Handshake для процессора ---

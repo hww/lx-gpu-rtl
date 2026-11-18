@@ -1,3 +1,4 @@
+
 `timescale 1ns/1ps
 `default_nettype none
 
@@ -56,7 +57,7 @@ module pixel_engine (
     // format used for the shifter: the new mode if it is written this cycle
     logic [2:0] mode_load;
     logic [2:0] k;
-    assign mode_load = mode_we_i ? mode_i : mode_r_active;
+    assign mode_load = mode_we_i ? mode_i : mode_r[ch_i]; // <-- ?????????? ? mode_r_active ?? mode_r[ch_i]
     assign k         = k_of_fmt(mode_load);
 
     // =====================================================================
@@ -68,6 +69,7 @@ module pixel_engine (
     logic        reg_valid_r;
     logic        busy_r;
     logic        prefetch_pend_r;
+    logic        idx_loading_r; // <-- ???????? 1 ???? ??? 1-????????? ?????? IDX ?? BRAM
 
     // =====================================================================
     // BRAM: 8 x 20, Simple Dual-Port, Write-First on collision
@@ -138,9 +140,6 @@ module pixel_engine (
     logic        step_accept;
     logic        auto_inc;
 
-    // The spec allows only one write per cycle. Priority:
-    //   IDX/STEP from the CPU > auto-increment.
-    // Simultaneous IDX and STEP cannot happen by bus protocol.
     assign idx_accept  = idx_we_i;
     assign step_accept = step_we_i;
     assign auto_inc    = access_done_i && !idx_accept && !step_accept;
@@ -167,23 +166,18 @@ module pixel_engine (
 
     // =====================================================================
     // BRAM read port mux
-    //   default                 : {ch_i, 0}  (prepare IDX for the CPU)
-    //   during an IDX write     : {ch_i, 0}  (Write-First, latch new IDX)
-    //   after reg_idx is loaded : {ch_i, 1}  (fetch STEP)
     // =====================================================================
     logic reg_loaded_prev;
     always_comb begin
-        if (reg_loaded_prev && reg_valid_r)
-            bram_raddr = {active_ch_r, 1'b1};   // next: STEP
+        if (idx_we_i || (idx_loading_r && (active_ch_r == ch_i)))
+            bram_raddr = {ch_i, 1'b1};   // next: STEP
         else
-            bram_raddr = {ch_i, 1'b0};          // next: IDX
+            bram_raddr = {ch_i, 1'b0};   // next: IDX
     end
 
     // =====================================================================
     // control
     // =====================================================================
-    // "busy" only means: a cache transaction is in flight for active_ch_r,
-    // reg_idx must not be overwritten.
     logic start_access;
     assign start_access = access_i && idx_valid_o && !busy_r;
 
@@ -200,33 +194,36 @@ module pixel_engine (
             reg_idx         <= 20'd0;
             reg_step        <= 20'd0;
             reg_loaded_prev <= 1'b0;
+            idx_loading_r   <= 1'b0;
         end else begin
             // ---------------------------------------------------------
             // reg_idx loading
-            //   * from bram_dout on a Write-First IDX write (Variant A)
-            //   * from bram_dout in Phase 0 of an access
-            //   * from next_idx at the end of a transaction (Phase 1)
             // ---------------------------------------------------------
             if (idx_we_i && !busy_r) begin
-                // Variant A: new IDX is on bram_dout (Write-First)
-                reg_idx         <= bram_dout;
+                // <-- ????? idx_load ???????? (0 ?????? ????????), ? STEP ??? ????????
+                reg_idx         <= idx_load;
                 active_ch_r     <= ch_i;
                 reg_valid_r     <= 1'b1;
                 reg_loaded_prev <= 1'b1;
-            end else if (!busy_r && !reg_valid_r) begin
-                // Phase 0: load IDX of the requested channel
-                reg_idx         <= bram_dout;
-                active_ch_r     <= ch_i;
-                reg_valid_r     <= 1'b1;
-                reg_loaded_prev <= 1'b1;
-            end else if (!busy_r && (active_ch_r != ch_i)) begin
-                // Phase 0 again: channel switched, reload
-                reg_idx         <= bram_dout;
-                active_ch_r     <= ch_i;
-                reg_valid_r     <= 1'b1;
-                reg_loaded_prev <= 1'b1;
-            end else if (reg_loaded_prev && reg_valid_r && !busy_r) begin
-                // bram_dout now holds STEP of active_ch_r
+                idx_loading_r   <= 1'b0;
+            end else if (!busy_r && (!reg_valid_r || (active_ch_r != ch_i))) begin
+                reg_loaded_prev <= 1'b0;
+                if (!idx_loading_r || (active_ch_r != ch_i)) begin
+                    active_ch_r   <= ch_i;
+                    reg_valid_r   <= 1'b0;
+                    idx_loading_r <= 1'b1;
+                end else begin
+                    reg_idx         <= bram_dout;
+                    reg_valid_r     <= 1'b1;
+                    idx_loading_r   <= 1'b0;
+                    reg_loaded_prev <= 1'b1;
+                end
+            end
+
+            if (step_we_i && (ch_i == active_ch_r) && !busy_r) begin
+                reg_step        <= step_load;
+                reg_loaded_prev <= 1'b0;
+            end else if (reg_loaded_prev && !(!busy_r && (active_ch_r != ch_i))) begin
                 reg_step        <= bram_dout;
                 reg_loaded_prev <= 1'b0;
             end
@@ -239,27 +236,19 @@ module pixel_engine (
                 busy_r          <= 1'b0;
                 reg_valid_r     <= 1'b1;
                 prefetch_pend_r <= (next_idx[18:4] != reg_idx[18:4]);
-                reg_loaded_prev <= 1'b0;
             end
 
             // start of a new cache transaction
             if (start_access) begin
-                busy_r          <= 1'b1;
-                reg_loaded_prev <= 1'b0;
+                busy_r <= 1'b1;
             end
 
             // ---------------------------------------------------------
-            // prefetch strobe
-            // ---------------------------------------------------------
-            if (prefetch_pend_r && !access_i && !idx_we_i &&
-                (active_ch_r == ch_i)) begin
-                prefetch_pend_r <= 1'b0;
-            end
-
-            // ---------------------------------------------------------
-            // prefetch_pend_r reset on any activity (fix #2)
+            // prefetch strobe & reset on activity
             // ---------------------------------------------------------
             if (access_i || idx_we_i || (active_ch_r != ch_i))
+                prefetch_pend_r <= 1'b0;
+            else if (prefetch_pend_r && (active_ch_r == ch_i))
                 prefetch_pend_r <= 1'b0;
 
             // ---------------------------------------------------------
@@ -271,21 +260,13 @@ module pixel_engine (
                 else if (idx_we_i && ch_i == i[1:0])
                     idxh_r[i] <= 3'h0;
             end
-
             // ---------------------------------------------------------
             // MODE
             // ---------------------------------------------------------
             if (mode_we_i)
                 mode_r[ch_i] <= mode_i;
-
-            // ---------------------------------------------------------
-            // reg_step does NOT change here on step_we_i during busy_r:
-            // the current next_idx already uses the old step (fix #3),
-            // the new step applies to the next auto-increment.
-            // ---------------------------------------------------------
         end
     end
-
     // prefetch_o: one-cycle strobe
     logic prefetch_r;
     assign prefetch_o = prefetch_r;
@@ -293,8 +274,6 @@ module pixel_engine (
         if (rst)
             prefetch_r <= 1'b0;
         else
-            prefetch_r <= prefetch_pend_r && !access_i && !idx_we_i &&
-                          (active_ch_r == ch_i);
+            prefetch_r <= prefetch_pend_r && !access_i && !idx_we_i && (active_ch_r == ch_i);
     end
-
 endmodule
