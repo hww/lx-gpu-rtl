@@ -10,7 +10,7 @@
 //
 // Contract: ch_stb_i   must drop in the cycle ack_o is high; flush_sel_i must
 // stay stable until flush_ack_o.
-module gpu_cache (
+module ch_cache (
     input  logic        clk,
     input  logic        rst,
 

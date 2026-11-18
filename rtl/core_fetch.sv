@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// fetch_unit: PC, hardware loop (L bit), SHADOW and PC redirection.
+// core_fetch: PC, hardware loop (L bit), SHADOW and PC redirection.
 //
 // Invariant: while kill_r = 0 the IR holds mem[pc_o - 1]. Any redirect breaks
 // it, so kill_r = 1 marks the IR as a bubble until the next advance.
@@ -14,7 +14,7 @@
 //
 // hold_o: D must wait one cycle because X is about to change state that this
 // D word reads (flags, SHADOW, LOOP). Costs nothing otherwise.
-module fetch_unit (
+module core_fetch (
     input  logic        clk,
     input  logic        rst,
     input  logic        clear_i,        // start / host reset: pc = 0, state cleared
@@ -75,7 +75,7 @@ module fetch_unit (
     assign d_ret    = d_is_ctrl && !d_reg && (d_op == CTRL_RET);
     assign d_branch = d_jmp || d_call || d_ret;
 
-    cond_eval u_cond (.cond_i(d_cond), .flags_i(flags_i), .ok_o(d_cond_ok));
+    core_cond u_cond (.cond_i(d_cond), .flags_i(flags_i), .ok_o(d_cond_ok));
 
     assign d_taken      = d_valid_o && d_branch && d_cond_ok;
     assign d_loop_taken = d_valid_o && d_loop && (loop_cnt_r > 16'd1) && !d_taken;

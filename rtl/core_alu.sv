@@ -12,7 +12,7 @@
 // WRITE=0, TST = AND with WRITE=0). MHI register lives in top.
 // Flags: Z, N always; C, V only for arithmetic (upd_cv = 1).
 // C = carry out (= not borrow for SUB/SBC).
-module alu (
+module core_alu (
     input  logic [4:0]  alu_op,
     input  logic [15:0] a,
     input  logic [15:0] b,

@@ -1,6 +1,6 @@
-// sim/main_top.cpp — top.sv test (Vtop, без tb_top_wrapper)
-#include "Vtop.h"
-#include "Vtop___024root.h"     // ← вернуть, он нужен для rootp
+// sim/main_top.cpp — top.sv test (Vgpu_top, без tb_top_wrapper)
+#include "Vgpu_top.h"
+#include "Vgpu_top___024root.h"     // ← вернуть, он нужен для rootp
 #include "verilated.h"
 #include "verilated_vcd_c.h"
 #include "image_io.h"
@@ -19,7 +19,7 @@
 #define CLR_CYN  "\033[36m"
 #define CLR_BLD  "\033[1m"
 
-static Vtop* dut;
+static Vgpu_top* dut;
 static VerilatedVcdC* tfp_p = nullptr;
 static uint64_t cycles = 0;
 static int g_verbose = 0;
@@ -137,7 +137,7 @@ static void dump_rom_hex(const char* tag, uint32_t word_off, uint32_t nwords) {
         printf("  %03X:", word_off + i);
         for (uint32_t j = 0; j < 4 && i + j < nwords; j++) {
             uint32_t w = word_off + i + j;
-            uint32_t v = (w < ROM_SIZE) ? (uint32_t)dut->rootp->top__DOT__u_rom__DOT__mem[w] : 0;
+            uint32_t v = (w < ROM_SIZE) ? (uint32_t)dut->rootp->gpu_top__DOT__u_rom__DOT__mem[w] : 0;
 
             printf(" %08X", v);
         }
@@ -154,15 +154,15 @@ static void tick(int clk, bool log) {
 
     // Печатаем инструкцию только в момент её завершения (x_do == 1)
     // и только на переднем фронте клока (чтобы не дублировать)
-    if (log && g_verbose && clk == 1 && dut->rootp->top__DOT__x_do) {
-        uint32_t insn = (uint32_t)dut->rootp->top__DOT__x_ins_r;
+    if (log && g_verbose && clk == 1 && dut->rootp->gpu_top__DOT__x_do) {
+        uint32_t insn = (uint32_t)dut->rootp->gpu_top__DOT__x_ins_r;
         
         // Вычисляем адрес текущей инструкции. 
         // fu_pc уже указывает на следующую, поэтому вычитаем 1.
         // Если был переход (t_fu_x_jump), то fu_pc - это target, и вычитать 1 нельзя.
         // Но для лога просто покажем fu_pc (адрес следующей) и текущую инструкцию.
         uint32_t pc_cur = (uint32_t)dut->pc_o; 
-        if (dut->rootp->top__DOT__t_fu_x_jump) {
+        if (dut->rootp->gpu_top__DOT__t_fu_x_jump) {
             // Если это JMP по регистру, pc_o уже target. 
             // Оставим как есть, чтобы видеть, куда прыгнули.
         } else {
@@ -187,8 +187,8 @@ static void step() {
     if (g_verbose && dut->wb_cyc_o && dut->wb_stb_o) {
         uint32_t addr = (dut->wb_adr_o >> 1) & (MEM_WORDS - 1);
         // Достаем IDX и STEP из pixel_engine (канал 0)
-        uint32_t idx_cur  = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__reg_idx;
-        uint32_t step_cur = dut->rootp->top__DOT__u_ch__DOT__u_pe__DOT__reg_step;
+        uint32_t idx_cur  = dut->rootp->gpu_top__DOT__u_ch__DOT__u_pe__DOT__reg_idx;
+        uint32_t step_cur = dut->rootp->gpu_top__DOT__u_ch__DOT__u_pe__DOT__reg_step;
         printf("[WB] %s adr=0x%04X dat=0x%04X (IDX=0x%05X STEP=0x%05X)\n",
                dut->wb_we_o ? "WR" : "RD",
                (unsigned)dut->wb_adr_o,
@@ -266,7 +266,7 @@ static void load_hex_into_rom(const char* path) {
 
     // записать в ROM через иерархию (Verilator public)
     for (uint32_t i = 0; i < ROM_SIZE; i++)
-        dut->rootp->top__DOT__u_rom__DOT__mem[i] = rom[i];
+        dut->rootp->gpu_top__DOT__u_rom__DOT__mem[i] = rom[i];
 }
 
 // ===== RAM loader =====
@@ -355,7 +355,7 @@ static std::string make_default_out_path(const char* in_path) {
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     printf("DEBUG argc=%d\n", argc);
-    dut = new Vtop;
+    dut = new Vgpu_top;
 
     // ===== args =====
     // 1. GPU Program
@@ -471,7 +471,7 @@ int main(int argc, char** argv) {
     header("ROM BOOTLOADER");
     load_hex_into_rom("rtl/bootloader.hex");
     {
-        uint32_t r0 = dut->rootp->top__DOT__u_rom__DOT__mem[0];
+        uint32_t r0 = dut->rootp->gpu_top__DOT__u_rom__DOT__mem[0];
         check_nonzero("rom[0] loaded", r0, 32);
         printf("  rom[0] = %08X  %s\n", r0, disasm32(r0));
     }
@@ -533,10 +533,10 @@ int main(int argc, char** argv) {
         if (progress_every && (cycles - last_prog) >= progress_every) {
             printf(CLR_YEL "[progress]" CLR_RST " cycles=%llu pc=%03X R0=%04X R1=%04X R2=%04X R3=%04X\n",
                    (unsigned long long)cycles, (unsigned)dut->pc_o,
-                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[0],
-                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[1],
-                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[2],
-                   (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[3]);
+                   (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[0],
+                   (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[1],
+                   (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[2],
+                   (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[3]);
             last_prog = cycles;
         }
 
@@ -574,17 +574,17 @@ int main(int argc, char** argv) {
         header("CONTEXT AT FAILURE");
         printf("  pc = %03X, R0=%04X R1=%04X R2=%04X R3=%04X\n",
                (unsigned)dut->pc_o,
-               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[0],
-               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[1],
-               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[2],
-               (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[3]);
+               (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[0],
+               (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[1],
+               (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[2],
+               (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[3]);
         printf("  roma=%03X roml=%04X rom_we=%d\n",
-               (unsigned)dut->rootp->top__DOT__t_roma_r,
-               (unsigned)dut->rootp->top__DOT__t_roml_r,
-               (int)dut->rootp->top__DOT__t_rom_acc_we);
+               (unsigned)dut->rootp->gpu_top__DOT__t_roma_r,
+               (unsigned)dut->rootp->gpu_top__DOT__t_roml_r,
+               (int)dut->rootp->gpu_top__DOT__t_rom_acc_we);
         printf("  ch: error=%d status=%X\n",
-            (int)dut->rootp->top__DOT__ch_error,
-            (unsigned)dut->rootp->top__DOT__ch_status);
+            (int)dut->rootp->gpu_top__DOT__ch_error,
+            (unsigned)dut->rootp->gpu_top__DOT__ch_status);
     }
 
     dump_rom_hex("after run 0x00", 0x000, 16);
@@ -594,7 +594,7 @@ int main(int argc, char** argv) {
     printf("\n" CLR_BLD "registers R0..R31:" CLR_RST "\n");
     for (int i = 0; i < 32; i++) {
         printf("  R%02d = %04X\n", i,
-            (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[i]);
+            (unsigned)dut->rootp->gpu_top__DOT__u_rf__DOT__mem_a[i]);
     }
     
     dump_mem_hex("RAM after run", dst_off >> 1, 0x40);

@@ -1,8 +1,8 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module pixel_blender
-    import fmt_pkg::*;
+module ch_blender
+    import gpu_fmt_pkg::*;
 (
     input  logic        clk,
     input  logic        rst,

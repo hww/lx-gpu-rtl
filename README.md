@@ -27,6 +27,6 @@ A small, programmable 2D raster engine for MSX-class machines. The CPU says "dra
 
 ## Status
 
-**Pre-alpha.** The behavioural C++ model validates the instruction set against 12 tests (fill, sprite copy, 8/1 bpp, affine, paging, pass-through, MMIO, ALU logic). RTL is being written against that model.
+**Pre-alpha.** The behavioural C++ model validates the instruction set against 12 tests (fill, sprite copy, 8/1 bpp, affine, paging, pass-through, MMIO, CORE_ALU logic). RTL is being written against that model.
 
 ## Repository layout

@@ -1,11 +1,11 @@
-`ifndef FMT_PKG_SV
-`define FMT_PKG_SV
+`ifndef GPU_FMT_PKG_SV
+`define GPU_FMT_PKG_SV
 
 
 `timescale 1ns/1ps
 `default_nettype none
 
-package fmt_pkg;
+package gpu_fmt_pkg;
 
     typedef struct packed {
         logic [2:0]  k;         // log2(пикселей в 16-бит слове)

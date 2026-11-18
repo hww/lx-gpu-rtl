@@ -6,14 +6,16 @@ PACKAGE  := CABGA256
 LPF      := icesugar_pro.lpf
 BUILD    := build
 
-RTL := rtl/fmt_pkg.sv rtl/alu.sv rtl/regfile.sv rtl/cond_eval.sv rtl/fetch_unit.sv rtl/microcode_rom.sv \
-       rtl/gpu_cache.sv rtl/gpu_host.sv rtl/sequencer.sv rtl/microcode_rom.sv \
-       rtl/top.sv rtl/top_fpga.sv
-TOP := top_fpga
+RTL := rtl/gpu_fmt_pkg.sv \
+       rtl/core_alu.sv rtl/core_regfile.sv rtl/core_cond.sv rtl/core_fetch.sv rtl/core_rom.sv \
+       rtl/ch_addr_gen.sv rtl/ch_blender.sv rtl/ch_cache.sv rtl/ch_top.sv \
+       rtl/host_if.sv rtl/gpu_top.sv rtl/gpu_fpga.sv
+TOP := gpu_fpga
 
-.PHONY: all synth pnr bit clean top stat sprite \
-        sim-top sim-alu sim-pixel-engine \
-        sim-pixel-blender sim-gpu-cache sim-channel asm dis
+.PHONY: all synth pnr bit clean top stat \
+        sim-top sim-top-alu sim-channel-wr sim-loop sim-outer-loop sim-sprite \
+        sim-core-alu sim-addr-gen sim-blender sim-cache sim-channel \
+        sim-fetch sim-cond sim-host asm dis
 
 all: bit
 
@@ -30,9 +32,9 @@ dis: tools/dis.cpp tools/disasm.h tools/isa.h | $(BUILD)
 	g++ -std=c++17 -O2 -I tools -o $(BUILD)/dis tools/dis.cpp
 
 # ================================================================
-# sim-top: Vtop, без tb_top_wrapper
+# top: Vgpu_top (полная симуляция ядра)
 # ================================================================
-top: asm $(wildcard tools/*.h) | $(BUILD)
+gpu-top: asm $(wildcard tools/*.h) | $(BUILD)
 	mkdir -p $(BUILD)/sim_top
 	verilator --cc --exe --build -j 1 \
 		-DSIMULATION \
@@ -40,30 +42,28 @@ top: asm $(wildcard tools/*.h) | $(BUILD)
 		-Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE -Wno-UNOPTFLAT \
 		--trace \
 		--public-flat-rw \
-		--top-module top \
+		--top-module gpu_top \
 		-Mdir $(CURDIR)/$(BUILD)/sim_top \
-		rtl/fmt_pkg.sv rtl/alu.sv rtl/regfile.sv rtl/cond_eval.sv rtl/fetch_unit.sv rtl/microcode_rom.sv \
-		rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv rtl/channel_unit.sv \
-		rtl/top.sv \
-		$(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
+		rtl/gpu_fmt_pkg.sv \
+		rtl/core_alu.sv rtl/core_regfile.sv rtl/core_cond.sv rtl/core_fetch.sv rtl/core_rom.sv \
+		rtl/ch_addr_gen.sv rtl/ch_blender.sv rtl/ch_cache.sv rtl/ch_top.sv \
+		rtl/gpu_top.sv \
+		$(CURDIR)/sim/main_gpu_top.cpp $(CURDIR)/sim/image_io.cpp
 
-sim-top: top
-	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_alu.asm -gpuaddr 32
+sim-alu: gpu-top
+	./$(BUILD)/sim_top/Vgpu_top -v -trace -prog sim/test_alu.asm -gpuaddr 32
 
-sim-top-alu: top
-	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_alu.asm -gpuaddr 32
+sim-ch-wr: gpu-top
+	./$(BUILD)/sim_top/Vgpu_top -v -trace -prog sim/test_channel_write.asm -gpuaddr 32
 
-sim-channel-wr: top
-	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_channel_write.asm -gpuaddr 32
+sim-loop: gpu-top
+	./$(BUILD)/sim_top/Vgpu_top -v -trace -prog sim/test_loop.asm -gpuaddr 32
 
-sim-loop: top
-	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_loop.asm -gpuaddr 32
+sim-outer-loop: gpu-top
+	./$(BUILD)/sim_top/Vgpu_top -v -trace -prog sim/test_outer_loop.asm -gpuaddr 32
 
-sim-outer-loop: top
-	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_outer_loop.asm -gpuaddr 32
-
-sim-sprite: top
-	./$(BUILD)/sim_top/Vtop \
+sim-sprite: gpu-top
+	./$(BUILD)/sim_top/Vgpu_top \
 	    -trace \
 		-prog sim/test_sprite.asm -gpuaddr 32 \
 		-s1in images/sprite01_16x16_8bpp.png -s1fmt 8bpp -s1w 16 -s1h 16 -s1off 0x0400 \
@@ -71,86 +71,95 @@ sim-sprite: top
 		-out images/output.png
 
 
-# ---- остальные sim-* (модульные тесты) ----
-sim-alu: | $(BUILD)
-	mkdir -p $(BUILD)/sim_alu
+# ================================================================
+# Модульные тесты (sim-*)
+# ================================================================
+core-alu: | $(BUILD)
+	mkdir -p $(BUILD)/sim_core_alu
 	verilator --cc --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module alu -Mdir $(CURDIR)/$(BUILD)/sim_alu \
-	    rtl/alu.sv $(CURDIR)/sim/tb_alu.cpp
-	./$(BUILD)/sim_alu/Valu
+	    --top-module core_alu -Mdir $(CURDIR)/$(BUILD)/sim_core_alu \
+	    rtl/core_alu.sv $(CURDIR)/sim/tb_core_alu.cpp
+	./$(BUILD)/sim_core_alu/Vcore_alu
 
-sim-pixel-engine: | $(BUILD)
-	mkdir -p $(BUILD)/sim_pixel_engine
+ch-addr-gen: | $(BUILD)
+	mkdir -p $(BUILD)/sim_addr_gen
 	verilator --cc --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module pixel_engine -Mdir $(CURDIR)/$(BUILD)/sim_pixel_engine \
-	    rtl/fmt_pkg.sv rtl/pixel_engine.sv $(CURDIR)/sim/tb_pixel_engine.cpp
-	./$(BUILD)/sim_pixel_engine/Vpixel_engine
+	    --top-module ch_addr_gen -Mdir $(CURDIR)/$(BUILD)/sim_addr_gen \
+	    rtl/gpu_fmt_pkg.sv rtl/ch_addr_gen.sv $(CURDIR)/sim/tb_ch_addr_gen.cpp
+	./$(BUILD)/sim_addr_gen/Vch_addr_gen
 
-sim-pixel-blender: | $(BUILD)
-	mkdir -p $(BUILD)/sim_pixel_blender
+ch-blender: | $(BUILD)
+	mkdir -p $(BUILD)/sim_blender
 	verilator --cc --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module pixel_blender -Mdir $(CURDIR)/$(BUILD)/sim_pixel_blender \
-	    rtl/fmt_pkg.sv rtl/pixel_blender.sv $(CURDIR)/sim/tb_pixel_blender.cpp
-	./$(BUILD)/sim_pixel_blender/Vpixel_blender
+	    --top-module ch_blender -Mdir $(CURDIR)/$(BUILD)/sim_blender \
+	    rtl/gpu_fmt_pkg.sv rtl/ch_blender.sv $(CURDIR)/sim/tb_ch_blender.cpp
+	./$(BUILD)/sim_blender/Vch_blender
 
-sim-cache: | $(BUILD)
-	mkdir -p $(BUILD)/sim_gpu_cache
+ch-cache: | $(BUILD)
+	mkdir -p $(BUILD)/sim_cache
 	verilator --cc --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module gpu_cache -Mdir $(CURDIR)/$(BUILD)/sim_gpu_cache \
-	    rtl/gpu_cache.sv $(CURDIR)/sim/tb_gpu_cache.cpp
-	./$(BUILD)/sim_gpu_cache/Vgpu_cache
+	    --top-module ch_cache -Mdir $(CURDIR)/$(BUILD)/sim_cache \
+	    rtl/ch_cache.sv $(CURDIR)/sim/tb_ch_cache.cpp
+	./$(BUILD)/sim_cache/Vch_cache
 
-
-sim-fetch: | $(BUILD)
-	mkdir -p $(BUILD)/tb_fetch_unit
-	verilator --cc --exe --build -j 1 -DSIMULATION \
-	    -CFLAGS "-I$(CURDIR)/tools" \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module fetch_unit -Mdir $(CURDIR)/$(BUILD)/tb_fetch_unit \
-	    rtl/fetch_unit.sv  rtl/cond_eval.sv $(CURDIR)/sim/tb_fetch_unit.cpp
-	./$(BUILD)/tb_fetch_unit/Vfetch_unit
-
-sim-cond: | $(BUILD)
-	mkdir -p $(BUILD)/cond_eval
-	verilator --cc --exe --build -j 1 -DSIMULATION \
-	    -CFLAGS "-I$(CURDIR)/tools" \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module cond_eval -Mdir $(CURDIR)/$(BUILD)/cond_eval \
-	    rtl/cond_eval.sv $(CURDIR)/sim/tb_cond_eval.cpp
-	./$(BUILD)/cond_eval/Vcond_eval
-
-
-sim-channel: | $(BUILD)
-	mkdir -p $(BUILD)/tb_channel_unit
+ch-top: | $(BUILD)
+	mkdir -p $(BUILD)/sim_channel
 	verilator --cc --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --trace \
-	    --top-module channel_unit -Mdir $(CURDIR)/$(BUILD)/tb_channel_unit \
-	    rtl/fmt_pkg.sv rtl/channel_unit.sv rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv \
-	    $(CURDIR)/sim/tb_channel_unit.cpp
-	./$(BUILD)/tb_channel_unit/Vchannel_unit
+	    --top-module ch_top -Mdir $(CURDIR)/$(BUILD)/sim_channel \
+	    rtl/gpu_fmt_pkg.sv rtl/ch_top.sv rtl/ch_addr_gen.sv rtl/ch_blender.sv rtl/ch_cache.sv \
+	    $(CURDIR)/sim/tb_ch_top.cpp
+	./$(BUILD)/sim_channel/Vch_top
+
+core-fetch: | $(BUILD)
+	mkdir -p $(BUILD)/sim_fetch
+	verilator --cc --exe --build -j 1 -DSIMULATION \
+	    -CFLAGS "-I$(CURDIR)/tools" \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module core_fetch -Mdir $(CURDIR)/$(BUILD)/sim_fetch \
+	    rtl/core_fetch.sv rtl/core_cond.sv $(CURDIR)/sim/tb_core_fetch.cpp
+	./$(BUILD)/sim_fetch/Vcore_fetch
+
+core-cond: | $(BUILD)
+	mkdir -p $(BUILD)/sim_cond
+	verilator --cc --exe --build -j 1 -DSIMULATION \
+	    -CFLAGS "-I$(CURDIR)/tools" \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module core_cond -Mdir $(CURDIR)/$(BUILD)/sim_cond \
+	    rtl/core_cond.sv $(CURDIR)/sim/tb_core_cond.cpp
+	./$(BUILD)/sim_cond/Vcore_cond
+
+host-if: | $(BUILD)
+	mkdir -p $(BUILD)/sim_host
+	verilator --cc --exe --build -j 1 -DSIMULATION \
+	    -CFLAGS "-I$(CURDIR)/tools" \
+	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --top-module host_if -Mdir $(CURDIR)/$(BUILD)/sim_host \
+	    rtl/host_if.sv $(CURDIR)/sim/tb_host_if.cpp
+	./$(BUILD)/sim_host/Vhost_if
+
+
 
 
 # ================================================================
 # synth / pnr / bit (без asm/pack)
 # ================================================================
-# Плоская статистика (для оценки всей FPGA)
 synth: | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/synth.log -p \
 	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
 	@echo "=== flat stat ==="
 	@cat $(BUILD)/stat_flat.txt
 
-# Иерархическая статистика (для понимания, где что тратится)
 stat: | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p \
 	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
@@ -166,4 +175,3 @@ bit: pnr
 
 clean:
 	rm -rf $(BUILD)
-

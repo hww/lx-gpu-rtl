@@ -11,7 +11,7 @@
 //   acc_we has priority over acc_re.
 // ROMA (acc_addr) is kept and auto-incremented by top.
 // Writing the word being fetched in the same cycle is undefined.
-module microcode_rom #(
+module core_rom #(
     parameter int DEPTH     = 4096,
     parameter int ADDR_W    = 12,
     parameter int DATA_W    = 32,

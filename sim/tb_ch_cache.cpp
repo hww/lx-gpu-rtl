@@ -1,10 +1,10 @@
-#include "Vgpu_cache.h"
+#include "Vch_cache.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 
-static Vgpu_cache* dut;
+static Vch_cache* dut;
 static int errors = 0;
 static int checks = 0;
 
@@ -124,9 +124,9 @@ static void do_flush(uint8_t ch) {
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Vgpu_cache;
+    dut = new Vch_cache;
 
-    printf(CLR_BLD "gpu_cache testbench (Wishbone-style ch_* ports)" CLR_RST "\n");
+    printf(CLR_BLD "ch_cache testbench (Wishbone-style ch_* ports)" CLR_RST "\n");
     wb_reset_mem();
     reset();
 

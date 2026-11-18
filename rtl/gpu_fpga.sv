@@ -60,7 +60,7 @@ module top_fpga (
     logic [15:0] wbm_dat_o_g;
     logic        wbm_ack_g;
 
-    top u_gpu (
+    gpu_top u_gpu (
         .clk(clk), .rst(rst),
         .halted_o(gpu_halted),
         .error_o(gpu_error),

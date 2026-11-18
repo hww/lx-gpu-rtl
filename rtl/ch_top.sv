@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module channel_unit (
+module ch_top (
     input  logic        clk,
     input  logic        rst,
 
@@ -142,7 +142,7 @@ module channel_unit (
 
 
     // --- Инстанс pixel_engine ---
-    pixel_engine u_pe (
+    ch_addr_gen u_pe (
         .clk(clk), .rst(rst),
         .ch_i(ch_sel),
         .mode_we_i(pe_mode_we), .mode_i(pe_mode_val),
@@ -160,7 +160,7 @@ module channel_unit (
     );
 
     // --- Инстанс pixel_blender ---
-    pixel_blender u_blender (
+    ch_blender u_blender (
         .clk(clk), .rst(rst),
         .cyc_i(data_req_i && pe_idx_valid),
         .stb_i(data_req_i && pe_idx_valid),
@@ -178,7 +178,7 @@ module channel_unit (
     );
 
     // --- Инстанс gpu_cache ---
-    gpu_cache u_cache (
+    ch_cache u_cache (
         .clk(clk), .rst(rst),
         .ch_sel_i(ch_sel),
         .ch_addr_i(pe_word),

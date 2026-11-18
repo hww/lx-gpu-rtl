@@ -4,7 +4,7 @@
 // 32 x 16 register file, two EBR copies, synchronous read with write-through
 // bypass. Reads happen only when rd_en_i = 1 (the pipeline advances); with
 // rd_en_i = 0 the operand outputs hold their value.
-module regfile (
+module core_regfile (
     input  logic        clk,
     input  logic        rd_en_i,
 

@@ -1,4 +1,4 @@
-#include "Vchannel_unit.h"
+#include "Vch_top.h"
 #include "verilated.h"
 #include "verilated_vcd_c.h"
 #include <cstdio>
@@ -6,7 +6,7 @@
 #include <vector>
 #include <string>
 
-static Vchannel_unit* dut;
+static Vch_top* dut;
 static VerilatedVcdC* tfp = nullptr;
 static uint64_t sim_time = 0;
 static uint16_t sim_ram[512];
@@ -244,10 +244,10 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Verilated::traceEverOn(true);
 
-    dut = new Vchannel_unit;
+    dut = new Vch_top;
     tfp = new VerilatedVcdC;
     dut->trace(tfp, 99);
-    tfp->open("build/tb_channel_unit/wave.vcd");
+    tfp->open("build/tb_ch_top/wave.vcd");
 
     dut->clk = 1;
     idle_inputs();

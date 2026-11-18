@@ -1,8 +1,8 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// cond_eval: ARM-style condition test. flags_i = {V, C, N, Z}.
-module cond_eval (
+// core_cond: ARM-style condition test. flags_i = {V, C, N, Z}.
+module core_cond (
     input  logic [3:0] cond_i,
     input  logic [3:0] flags_i,
     output logic       ok_o

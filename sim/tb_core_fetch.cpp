@@ -1,9 +1,9 @@
-#include "Vfetch_unit.h"
+#include "Vcore_fetch.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 
-static Vfetch_unit* dut;
+static Vcore_fetch* dut;
 static int checks = 0;
 static int errors = 0;
 
@@ -69,7 +69,7 @@ static void section(const char* name) { printf("\n[%s]\n", name); }
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Vfetch_unit;
+    dut = new Vcore_fetch;
 
     // ---- сброс ----
     dut->rst         = 1;
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     tick(); tick();
     dut->rst = 0;
 
-    printf("=== fetch_unit tests ===\n");
+    printf("=== core_fetch tests ===\n");
 
     section("clear_i");
     dut->clear_i = 1; tick();
@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
     check_bit("HOLD.none",         dut->hold_o,   0);
     tick();
 
-    printf("\n=== fetch_unit tests done: %d checks, %d errors ===\n",
+    printf("\n=== core_fetch tests done: %d checks, %d errors ===\n",
            checks, errors);
     delete dut;
     return errors ? 1 : 0;

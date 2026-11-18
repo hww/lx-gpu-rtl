@@ -3,15 +3,15 @@
 
 // top: LX-GPU core. Three stages F -> D -> X, no state machine.
 //
-//   F  fetch_unit.pc_o -> ROM address; the ROM output register is the IR.
-//   D  IR valid. Regfile read addresses come straight from the IR and the
-//      regfile output registers capture the operands. fetch_unit resolves
+//   F  core_fetch.pc_o -> ROM address; the ROM output register is the IR.
+//   D  IR valid. core_regfile read addresses come straight from the IR and the
+//      core_regfile output registers capture the operands. core_fetch resolves
 //      JMP/CALL/RET and the L bit here.
 //   X  x_ins_r + operands: ALU, flags, register / CSR / device writes,
 //      devices, JMP by register, HALT, IRQ, FLUSH.
 //
 // Stall: X is busy while its device has not acknowledged (x_busy). Then adv = 0
-// and the IR, PC, regfile outputs and x_ins_r all hold.
+// and the IR, PC, core_regfile outputs and x_ins_r all hold.
 // One device per instruction: the assembler must reject an instruction whose
 // source and destination are both devices (DATA, ROM).
 //
@@ -24,7 +24,7 @@
 //   44..47 DATA[0..3]   48..51 IDX[0..3]   52..55 IDXH[0..3]
 //   56..59 STEP[0..3]   60..63 MODEPAGE[0..3]
 // Special operands as destination: MOV only (assembler rule).
-module top (
+module gpu_top (
     input  logic        clk,
     input  logic        rst,
 
@@ -159,7 +159,7 @@ module top (
     // ================================================================
     // Execute control: one device at a time, level request, ack from device
     // ================================================================
-    cond_eval u_xcond (
+    core_cond u_xcond (
         .cond_i(x_cond),
         .flags_i({flag_v_r, flag_c_r, flag_n_r, flag_z_r}),
         .ok_o(x_cond_ok)
@@ -194,8 +194,8 @@ module top (
     // ================================================================
     // Blocks
     // ================================================================
-    microcode_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
-                    .INIT_FILE("rtl/bootloader.hex")) u_rom (
+    core_rom #(.DEPTH(4096), .ADDR_W(12), .DATA_W(32),
+                    .INIT_FILE("boot/bootloader.hex")) u_rom (
         .clk(clk),
         .fetch_en_i(adv),
         .fetch_addr_i(fu_pc),
@@ -208,7 +208,7 @@ module top (
     );
 
 
-    fetch_unit u_fu (
+    core_fetch u_fu (
         .clk(clk), 
         .rst(rst),
         .clear_i(t_clear),   
@@ -221,14 +221,14 @@ module top (
         .shadow_o(fu_shadow), .loop_cnt_o(fu_loop_cnt), .loop_tgt_o(fu_loop_tgt)
     );
 
-    regfile u_rf (
+    core_regfile u_rf (
         .clk(clk), .rd_en_i(adv),
         .opa_addr_i(t_rf_opa_addr), .opa_data_o(rf_opa_data),
         .opb_addr_i(t_rf_opb_addr), .opb_data_o(rf_opb_data),
         .wr_en_i(t_rf_wr_en), .wr_addr_i(x_dst[4:0]), .wr_data_i(alu_result)
     );
 
-    alu u_alu (
+    core_alu u_core_alu (
         .alu_op(x_alu_op), .a(rf_opa_data), .b(t_alu_b), .carry_in(flag_c_r),
         .result(alu_result), .mul_hi(alu_mul_hi),
         .flag_z(alu_flag_z), .flag_n(alu_flag_n),
@@ -237,7 +237,7 @@ module top (
     
     logic ch_preload_busy, ch_preload_done;
 
-    channel_unit u_ch (
+    ch_top u_ch (
         .clk(clk), .rst(rst),
         .preload_i(gpu_start_i), .preload_addr_i(gpu_addr_i),
         .ch_i(t_ch_sel),
@@ -257,7 +257,7 @@ module top (
     );
 
     // ================================================================
-    // Operands (D addresses the regfile; X uses its outputs)
+    // Operands (D addresses the core_regfile; X uses its outputs)
     // ================================================================
     assign t_rf_opa_addr = rom_fetch_data[21:17];   // DST[4:0]
     assign t_rf_opb_addr = rom_fetch_data[10:6];    // SRC[4:0]

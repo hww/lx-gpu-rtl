@@ -1,11 +1,11 @@
-#include "Valu.h"
+#include "Vcore_alu.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-static Valu* dut;
+static Vcore_alu* dut;
 static int errors = 0;
 static int checks = 0;
 
@@ -67,9 +67,9 @@ static void header(const char* title) {
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Valu;
+    dut = new Vcore_alu;
 
-    printf(CLR_BLD "ALU testbench" CLR_RST " (combinational, no clk/rst)\n");
+    printf(CLR_BLD "CORE_ALU testbench" CLR_RST " (combinational, no clk/rst)\n");
 
     // ===== logic =====
     header("Logic");

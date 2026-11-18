@@ -1,9 +1,9 @@
-#include "Vpixel_engine.h"
+#include "Vch_addr_gen.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 
-static Vpixel_engine* dut;
+static Vch_addr_gen* dut;
 static int errors = 0;
 static int checks = 0;
 
@@ -107,7 +107,7 @@ static void expect_idx(const char* name, uint8_t ch, uint8_t mode,
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Vpixel_engine;
+    dut = new Vch_addr_gen;
 
     printf(CLR_BLD "pixel_engine testbench (New Architecture: frac_o & integer STEP)" CLR_RST "\n");
 

@@ -1,9 +1,9 @@
-#include "Vpixel_blender.h"
+#include "Vch_blender.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 
-static Vpixel_blender* dut;
+static Vch_blender* dut;
 static int errors = 0;
 static int checks = 0;
 
@@ -145,12 +145,12 @@ static void do_write(uint8_t mode, uint8_t frac, uint16_t word, uint16_t pixel,
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Vpixel_blender;
+    dut = new Vch_blender;
 
-    printf(CLR_BLD "pixel_blender testbench (New Architecture: frac_i & fmt_pkg)" CLR_RST "\n");
+    printf(CLR_BLD "ch_blender testbench (New Architecture: frac_i & gpu_fmt_pkg)" CLR_RST "\n");
     reset();
 
-    // Коды форматов по fmt_pkg:
+    // Коды форматов по gpu_fmt_pkg:
     // 0: 16bpp (k=0) | 1: 8bpp (k=1) | 2: 4bpp (k=2)
     // 3: 2bpp  (k=3) | 4: 1bpp (k=4) | 5: LO8 (k=0) | 6: HI8 (k=0)
 

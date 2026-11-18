@@ -1,9 +1,9 @@
-#include "Vcond_eval.h"
+#include "Vcore_cond.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 
-static Vcond_eval* dut;
+static Vcore_cond* dut;
 static int checks = 0, errors = 0;
 
 static void expect(int cond, int v, int c, int n, int z, int exp, const char* tag) {
@@ -50,10 +50,10 @@ static void sweep_cond(int cond, const char* tag) {
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Vcond_eval;
-    printf("=== cond_eval tests ===\n");
+    dut = new Vcore_cond;
+    printf("=== core_cond tests ===\n");
     for (int cond = 0; cond < 16; cond++) sweep_cond(cond, "sweep");
-    printf("=== cond_eval tests done: %d checks, %d errors ===\n", checks, errors);
+    printf("=== core_cond tests done: %d checks, %d errors ===\n", checks, errors);
     delete dut;
     return errors ? 1 : 0;
 }

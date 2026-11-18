@@ -12,7 +12,7 @@
 //
 // gpu_start_o : 1-cycle pulse, gpu_addr_o latched
 // gpu_reset_o : 1-cycle pulse
-module gpu_host (
+module host_if (
     input  logic        clk,
     input  logic        rst,
 

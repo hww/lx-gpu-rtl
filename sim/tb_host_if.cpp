@@ -1,10 +1,10 @@
-#include "Vgpu_host.h"
+#include "Vhost_if.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 #include <string>
 
-static Vgpu_host* dut;
+static Vhost_if* dut;
 static int errors = 0;
 static int checks = 0;
 
@@ -97,9 +97,9 @@ static void reset() {
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Vgpu_host;
+    dut = new Vhost_if;
 
-    printf(CLR_BLD "gpu_host testbench" CLR_RST "\n");
+    printf(CLR_BLD "host_if testbench" CLR_RST "\n");
     reset();
 
     // ===== 1. write GPU_ADDR0/1/2 =====
