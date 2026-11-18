@@ -17,7 +17,7 @@ module channel_unit (
     input  logic        step_we_i,
     input  logic        modepage_we_i,
     input  logic [15:0] wdata_i,
-    output logic        preload_busy_o,   // 1, пока идёт preload канала 0
+    output logic        preload_busy_o,
     output logic        preload_done_o, 
     
     // Доступ к DATA (от процессора)
@@ -27,7 +27,7 @@ module channel_unit (
     output logic [15:0] data_rdata_o,
 
     input  logic        flush_req_i,
-    input  logic [3:0]  flush_mask_i,
+    input  logic [1:0]  flush_sel_i,
     output logic        flush_ack_o,
 
     output logic [3:0]  status_o,
@@ -45,12 +45,19 @@ module channel_unit (
 
     // --- Сигналы от pixel_engine ---
     logic [14:0] pe_word;
-    logic [3:0]  pe_pos;
+    logic [3:0]  pe_frac;
     logic [2:0]  pe_mode;
     logic        pe_prefetch;
     logic        pe_access_done;
-    logic        pe_page_ovf;      // NEW
-    logic        pe_idx_valid;     // NEW
+    logic        pe_page_ovf;
+    logic        pe_idx_valid;
+
+    // --- Сигналы от pixel_blender ---
+    logic [15:0] blend_dat;
+    logic        blend_ack;
+    logic        blend_rmw_req;
+    logic        blend_rmw_we;
+    logic [15:0] blend_rmw_dat;
 
     // --- Сигналы от gpu_cache ---
     logic [23:0] cache_addr24;
@@ -59,7 +66,6 @@ module channel_unit (
     logic        cache_ack;
     logic [7:0]  cache_page;
     logic        cache_flush_done;
-    logic        cache_error;
 
     // --- Мультиплексоры: что писать в pixel_engine и gpu_cache ---
     logic        pe_mode_we, pe_idxh_we, pe_idx_we, pe_step_we;
@@ -67,12 +73,10 @@ module channel_unit (
     logic [15:0] pe_idx_val, pe_step_val;
     logic        cache_page_we;
     logic [7:0]  cache_page_val;
-    
-    // =====================================================================
-    // preload: два такта, чтобы IDX и STEP не конфликтовали за порт BRAM.
-    // MODE и PAGE пишутся в FF (не в BRAM) — их можно писать вместе с IDX.
-    // =====================================================================
 
+    // =====================================================================
+    // preload: такт 1 -> MODE=0 (16bpp), PAGE, IDX; такт 2 -> STEP=1
+    // =====================================================================
     logic pl_start, pl_step;
 
     always_ff @(posedge clk) begin
@@ -84,51 +88,63 @@ module channel_unit (
     assign preload_done_o = pl_step;
     assign preload_busy_o = pl_start | pl_step;
 
-    // =====================================================================
-    // 
-    // =====================================================================    
-    
     logic [1:0] ch_sel;
     assign ch_sel = (pl_start || pl_step) ? 2'd0 : ch_i;
 
     always_comb begin
-        // по умолчанию — процессор
-        pe_mode_we  = modepage_we_i;
-        pe_mode_val = wdata_i[10:8];
+        pe_mode_we     = modepage_we_i;
+        pe_mode_val    = wdata_i[10:8];
 
-        pe_idxh_we  = idxh_we_i;
-        pe_idxh_val = wdata_i[2:0];
+        pe_idxh_we     = idxh_we_i;
+        pe_idxh_val    = wdata_i[2:0];
 
-        pe_idx_we   = idx_we_i;
-        pe_idx_val  = wdata_i;
+        pe_idx_we      = idx_we_i;
+        pe_idx_val     = wdata_i;
 
-        pe_step_we  = step_we_i;
-        pe_step_val = wdata_i;
+        pe_step_we     = step_we_i;
+        pe_step_val    = wdata_i;
 
         cache_page_we  = modepage_we_i;
         cache_page_val = wdata_i[7:0];
 
-        // такт 1 preload: MODE=4 (16bpp), PAGE, IDX = addr[15:1]
-        // MODE и IDX одновременно — k уже = 0, сдвиг не нужен
         if (pl_start) begin
-            pe_mode_we    = 1'b1;
-            pe_mode_val   = 3'd4;
-            cache_page_we = 1'b1;
+            pe_mode_we     = 1'b1;
+            pe_mode_val    = 3'd0; // 16 bpp в новой кодировке (k=0)
+            cache_page_we  = 1'b1;
             cache_page_val = preload_addr_i[23:16];
-            pe_idx_we     = 1'b1;
-            pe_idx_val    = {1'b0, preload_addr_i[15:1]};
+            pe_idx_we      = 1'b1;
+            pe_idx_val     = {1'b0, preload_addr_i[15:1]};
         end
 
-        // такт 2 preload: STEP = 16 (1 слово)
         if (pl_step) begin
             pe_step_we  = 1'b1;
-            pe_step_val = 16'd16;
+            pe_step_val = 16'd1; // 1 пиксель (= 1 слово для 16 bpp)
         end
     end
 
+    // =====================================================================
+    // Арбитраж доступа к кэшу:
+    // - Чтение (data_we_i == 0): прямой запрос в кэш
+    // - Запись (data_we_i == 1): через RMW-автомат блендера
+    // - !cache_ack гарантирует сброс строба на 1 такт между фазами RMW
+    // =====================================================================
+    logic        cache_stb;
+    logic        cache_we;
+    logic [15:0] cache_wdata;
 
-   logic ch_access;
-    assign ch_access = data_req_i && pe_idx_valid;
+    assign cache_stb = pe_idx_valid && !cache_ack && !req_done_r &&
+                     (data_we_i ? blend_rmw_req : data_req_i);
+
+
+    assign cache_we    = data_we_i ? blend_rmw_we  : 1'b0;
+    assign cache_wdata = blend_rmw_dat;
+
+    logic req_done_r;
+    always_ff @(posedge clk) begin
+        if (rst || !data_req_i) req_done_r <= 1'b0;
+        else if (blend_ack)     req_done_r <= 1'b1;
+    end
+
 
     // --- Инстанс pixel_engine ---
     pixel_engine u_pe (
@@ -138,14 +154,32 @@ module channel_unit (
         .idxh_we_i(pe_idxh_we), .idxh_i(pe_idxh_val),
         .idx_we_i(pe_idx_we),   .idx_i(pe_idx_val),
         .step_we_i(pe_step_we), .step_i(pe_step_val),
-        .access_i(data_req_i),
+        .access_i(data_req_i && pe_idx_valid),
         .access_done_i(pe_access_done),
         .word_o(pe_word),
-        .pos_o(pe_pos),
+        .frac_o(pe_frac),
         .mode_o(pe_mode),
         .page_ovf_o(pe_page_ovf),
         .prefetch_o(pe_prefetch),
         .idx_valid_o(pe_idx_valid)
+    );
+
+    // --- Инстанс pixel_blender ---
+    pixel_blender u_blender (
+        .clk(clk), .rst(rst),
+        .cyc_i(data_req_i && pe_idx_valid && !req_done_r),
+        .stb_i(data_req_i && pe_idx_valid && !req_done_r),
+        .we_i(data_we_i),
+        .mode_i(pe_mode),
+        .frac_i(pe_frac),
+        .dat_i(cache_rdata),
+        .pixel_i(wdata_i),
+        .dat_o(blend_dat),
+        .ack_o(blend_ack),
+        .ack_i(cache_ack),
+        .rmw_req_o(blend_rmw_req),
+        .rmw_we_o(blend_rmw_we),
+        .rmw_dat_o(blend_rmw_dat)
     );
 
     // --- Инстанс gpu_cache ---
@@ -153,10 +187,10 @@ module channel_unit (
         .clk(clk), .rst(rst),
         .ch_sel_i(ch_sel),
         .ch_addr_i(pe_word),
-        .ch_stb_i(ch_access),
+        .ch_stb_i(cache_stb),
         .ch_prefetch_i(pe_prefetch),
-        .ch_we_i(data_we_i),
-        .ch_dat_i(wdata_i),
+        .ch_we_i(cache_we),
+        .ch_dat_i(cache_wdata),
         .ch_hit_o(cache_hit),
         .ch_dat_o(cache_rdata),
         .ack_o(cache_ack),
@@ -164,7 +198,7 @@ module channel_unit (
         .page_i(cache_page_val),
         .page_o(cache_page),
         .flush_en_i(flush_req_i),
-        .flush_sel_i(ch_i),
+        .flush_sel_i(flush_sel_i),
         .flush_ack_o(cache_flush_done),
         .wb_cyc_o(wb_cyc_o),
         .wb_stb_o(wb_stb_o),
@@ -176,14 +210,13 @@ module channel_unit (
         .addr24_o(cache_addr24)
     );
 
-    // --- Handshake для процессора ---
-    assign pe_access_done = cache_ack;
-    assign data_ack_o     = cache_ack;
-    assign data_rdata_o   = cache_rdata;
+    // --- Handshake для процессора и сдвига IDX (строго 1 импульс на запрос) ---
+
+    assign pe_access_done = blend_ack && !req_done_r;
+    assign data_ack_o     = blend_ack && !req_done_r;
+    assign data_rdata_o   = blend_dat;
     assign flush_ack_o    = cache_flush_done;
-    assign status_o       = {2'b0, pe_page_ovf, cache_error};
-    assign error_o        = cache_error | pe_page_ovf;
+    assign status_o       = {3'b0, pe_page_ovf};
+    assign error_o        = pe_page_ovf;
 
-
-    
 endmodule

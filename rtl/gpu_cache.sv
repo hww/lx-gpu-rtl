@@ -82,7 +82,7 @@ module gpu_cache (
     logic flush_req_r, flush_done_r;
     logic flush_noop_c, flush_done_c;
 
-    assign flush_noop_c = (state == ST_IDLE) && flush_req_r
+    assign flush_noop_c = (state == ST_IDLE) && (flush_req_r || (flush_en_i && !flush_done_r))
                        && !(valid_r[flush_sel_i] && dirty_r[flush_sel_i]);
     assign flush_done_c = ((state == ST_WRITEBACK) && wb_ack_i && op_flush_r)
                        || flush_noop_c;
@@ -92,11 +92,15 @@ module gpu_cache (
             flush_req_r  <= 1'b0;
             flush_done_r <= 1'b0;
         end else begin
-            if (flush_done_r) flush_req_r <= 1'b0;
-            if (flush_en_i)   flush_req_r <= 1'b1;     // a new request wins
+            if (flush_done_c)
+                flush_req_r <= 1'b0;
+            else if (flush_en_i && !flush_done_r)
+                flush_req_r <= 1'b1;
+
             flush_done_r <= flush_done_c && !flush_done_r;
         end
     end
+
     assign flush_ack_o = flush_done_r;
 
     // ===== what to do next (only in ST_IDLE) =====
@@ -123,7 +127,7 @@ module gpu_cache (
                 issue_ch = pend_ch;
                 if (valid_r[pend_ch] && dirty_r[pend_ch]) issue_wb    = 1'b1;
                 else                                      issue_apply = 1'b1;
-            end else if (flush_req_r && valid_r[flush_sel_i] && dirty_r[flush_sel_i]) begin
+            end else if ((flush_req_r || (flush_en_i && !flush_done_r)) && valid_r[flush_sel_i] && dirty_r[flush_sel_i]) begin
                 issue_wb    = 1'b1;
                 issue_flush = 1'b1;
                 issue_ch    = flush_sel_i;
@@ -186,10 +190,11 @@ module gpu_cache (
             op_flush_r <= 1'b0;
         end else begin
             // write hit
-            if (ch_we_i && ch_stb_i   && hit && !ack_r) begin
-                data_mem[ch_sel_i] <= ch_dat_i ;
+            if (ch_we_i && ch_stb_i && hit) begin
+                data_mem[ch_sel_i] <= ch_dat_i;
                 dirty_r[ch_sel_i]  <= 1'b1;
             end
+
 
             // flush of an invalid or clean channel: just invalidate
             if (flush_noop_c) begin
@@ -206,12 +211,12 @@ module gpu_cache (
                 pend_r[issue_ch]   <= 1'b0;
             end
 
-            // page register write: remember it (after the apply above, so a
-            // new request in the same cycle is not lost)
-            if (page_we_i) begin
+            // page register write: remember it only if page actually changed
+            if (page_we_i && (page_i != page_mem[ch_sel_i])) begin
                 pend_r[ch_sel_i]      <= 1'b1;
                 pend_page_r[ch_sel_i] <= page_i;
             end
+
 
             case (state)
                 ST_IDLE: begin

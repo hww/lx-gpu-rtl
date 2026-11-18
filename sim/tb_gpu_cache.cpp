@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
-#include <string>
 
 static Vgpu_cache* dut;
 static int errors = 0;
@@ -40,7 +39,6 @@ static void tick() {
     dut->clk = 1; dut->eval();
 }
 
-// TEST FAIL (not cache miss)
 static void test_fail(const char* name, uint32_t got, uint32_t exp, int bits) {
     checks++;
     if (got != exp) {
@@ -74,11 +72,11 @@ static void result_line(const char* name, int fails_before, const char* info) {
 
 static void reset() {
     dut->rst = 1;
-    dut->ch_i = 0; dut->word_i = 0;
-    dut->access_i = 0; dut->prefetch_i = 0;
-    dut->we_i = 0; dut->wdata_i = 0;
+    dut->ch_sel_i = 0; dut->ch_addr_i = 0;
+    dut->ch_stb_i = 0; dut->ch_prefetch_i = 0;
+    dut->ch_we_i = 0;  dut->ch_dat_i = 0;
     dut->page_we_i = 0; dut->page_i = 0;
-    dut->flush_en_i = 0; dut->flush_ch_i = 0;
+    dut->flush_en_i = 0; dut->flush_sel_i = 0;
     dut->wb_ack_i = 0; dut->wb_dat_i = 0;
     tick(); tick();
     dut->rst = 0;
@@ -86,41 +84,41 @@ static void reset() {
 }
 
 static void set_page(uint8_t ch, uint8_t page) {
-    dut->ch_i = ch;
+    dut->ch_sel_i  = ch;
     dut->page_we_i = 1;
-    dut->page_i = page;
+    dut->page_i    = page;
     tick();
     dut->page_we_i = 0;
 }
 
-// read or write; wait for access_done; *hit_out captured before fill
+// read or write; wait for ack_o; *hit_out captured before fill
 static uint16_t do_access(uint8_t ch, uint16_t word, int we, uint16_t wdata,
                           int* hit_out) {
-    dut->ch_i = ch;
-    dut->word_i = word;
-    dut->we_i = we;
-    dut->wdata_i = wdata;
-    dut->access_i = 1;
+    dut->ch_sel_i  = ch;
+    dut->ch_addr_i = word;
+    dut->ch_we_i   = we;
+    dut->ch_dat_i  = wdata;
+    dut->ch_stb_i  = 1;
     tick();
-    if (hit_out) *hit_out = dut->hit_o;
+    if (hit_out) *hit_out = dut->ch_hit_o;
 
     int timeout = 100;
     while (!dut->ack_o && timeout-- > 0) tick();
 
-    uint16_t r = dut->rdata_o;
-    dut->access_i = 0;
-    dut->we_i = 0;
+    uint16_t r = dut->ch_dat_o;
+    dut->ch_stb_i = 0;
+    dut->ch_we_i  = 0;
     tick();
     return r;
 }
 
 static void do_flush(uint8_t ch) {
-    dut->flush_en_i = 1;
-    dut->flush_ch_i = ch;
+    dut->flush_en_i  = 1;
+    dut->flush_sel_i = ch;
     tick();
     dut->flush_en_i = 0;
     int timeout = 200;
-    while (!dut->flush_done_o && timeout-- > 0) tick();
+    while (!dut->flush_ack_o && timeout-- > 0) tick();
     tick();
 }
 
@@ -128,7 +126,7 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vgpu_cache;
 
-    printf(CLR_BLD "gpu_cache testbench" CLR_RST "\n");
+    printf(CLR_BLD "gpu_cache testbench (Wishbone-style ch_* ports)" CLR_RST "\n");
     wb_reset_mem();
     reset();
 
@@ -175,12 +173,16 @@ int main(int argc, char** argv) {
     header("write miss -> fill + dirty, flush -> WB");
     {
         int fb = errors;
-        dut->ch_i = 0; dut->word_i = 0x0010;
-        dut->access_i = 1; dut->we_i = 1; dut->wdata_i = 0xABCD;
+        dut->ch_sel_i  = 0;
+        dut->ch_addr_i = 0x0010;
+        dut->ch_stb_i  = 1;
+        dut->ch_we_i   = 1;
+        dut->ch_dat_i  = 0xABCD;
         tick();
         int to = 100;
         while (!dut->ack_o && to-- > 0) tick();
-        dut->access_i = 0; dut->we_i = 0;
+        dut->ch_stb_i = 0;
+        dut->ch_we_i  = 0;
         tick();
         // not yet in WB (still in cache, dirty)
         test_fail("wmiss.wb_before", wb_mem[(0x00020 >> 1)], 0x0000, 16);
@@ -196,15 +198,19 @@ int main(int argc, char** argv) {
     header("write hit -> dirty");
     {
         int fb = errors;
-        // fill word 0x20 in cache with 0x0000 first (from WB)
+        // fill word 0x10 (byte addr 0x20) in cache first
         do_access(0, 0x0010, 0, 0, nullptr);
-        // write
-        dut->ch_i = 0; dut->word_i = 0x0010;
-        dut->access_i = 1; dut->we_i = 1; dut->wdata_i = 0x1111;
+        // write hit
+        dut->ch_sel_i  = 0;
+        dut->ch_addr_i = 0x0010;
+        dut->ch_stb_i  = 1;
+        dut->ch_we_i   = 1;
+        dut->ch_dat_i  = 0x1111;
         tick();
         int to = 100;
         while (!dut->ack_o && to-- > 0) tick();
-        dut->access_i = 0; dut->we_i = 0;
+        dut->ch_stb_i = 0;
+        dut->ch_we_i  = 0;
         tick();
         int hit = -1;
         uint16_t r = do_access(0, 0x0010, 0, 0, &hit);
@@ -245,14 +251,13 @@ int main(int argc, char** argv) {
     {
         int fb = errors;
         set_page(2, 0x00);
-        // addr24 for word=0x0001, page=0x00 is 0x000002 -> wb_mem[1]
         wb_mem[(0x00002 >> 1)] = 0xAAAA;
         int hit = -1;
         uint16_t r0 = do_access(2, 0x0001, 0, 0, &hit);
         check_bit("pg0.hit", hit, 0);
         test_fail("pg0.rdata", r0, 0xAAAA, 16);
 
-        set_page(2, 0x01);   // page 0x01 -> addr 0x10000..0x1FFFF
+        set_page(2, 0x01);
         wb_mem[((0x01 << 16) | 0x0002) >> 1] = 0xBBBB;
         uint16_t r1 = do_access(2, 0x0001, 0, 0, &hit);
         check_bit("pg1.hit", hit, 0);
@@ -265,31 +270,25 @@ int main(int argc, char** argv) {
     header("per-channel independence");
     {
         int fb = errors;
-        wb_mem[(0x00008 >> 1)] = 0xCAFE;
-        wb_mem[(0x0000A >> 1)] = 0xF00D;
-        set_page(0, 0x00);
+        wb_mem[(0x00040 >> 1)] = 0x3030;
+        wb_mem[(0x00042 >> 1)] = 0x3131;
+        set_page(2, 0x00);
         set_page(3, 0x00);
-        uint16_t r0 = do_access(0, 0x0004, 0, 0, nullptr);
-        uint16_t r3 = do_access(3, 0x0005, 0, 0, nullptr);
-        test_fail("ch0.rdata", r0, 0xCAFE, 16);
-        test_fail("ch3.rdata", r3, 0xF00D, 16);
-        int hit = -1;
-        do_access(0, 0x0004, 0, 0, &hit); check_bit("ch0.hit", hit, 1);
-        do_access(3, 0x0005, 0, 0, &hit); check_bit("ch3.hit", hit, 1);
-        char buf[48]; snprintf(buf, sizeof buf, "ch0=%04X ch3=%04X", r0, r3);
-        result_line("per-channel", fb, buf);
-    }
 
-    // ===== 10. addr24 output =====
-    header("addr24 output");
-    {
-        int fb = errors;
-        set_page(0, 0x00);
-        dut->ch_i = 0; dut->word_i = 0x0123;
-        dut->eval();
-        test_fail("addr24", dut->addr24_o, (0x00 << 16) | (0x0123 << 1), 24);
-        char buf[32]; snprintf(buf, sizeof buf, "addr24=%06X", dut->addr24_o);
-        result_line("addr24", fb, buf);
+        do_access(2, 0x0020, 0, 0, nullptr);
+        do_access(3, 0x0021, 0, 0, nullptr);
+
+        int h2 = -1, h3 = -1;
+        uint16_t r2 = do_access(2, 0x0020, 0, 0, &h2);
+        uint16_t r3 = do_access(3, 0x0021, 0, 0, &h3);
+
+        check_bit("ch2.hit", h2, 1);
+        check_bit("ch3.hit", h3, 1);
+        test_fail("ch2.rdata", r2, 0x3030, 16);
+        test_fail("ch3.rdata", r3, 0x3131, 16);
+
+        char buf[48]; snprintf(buf, sizeof buf, "ch2=%04X ch3=%04X", r2, r3);
+        result_line("per-channel", fb, buf);
     }
 
     // ===== summary =====

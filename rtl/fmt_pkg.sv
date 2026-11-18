@@ -1,3 +1,7 @@
+`ifndef FMT_PKG_SV
+`define FMT_PKG_SV
+
+
 `timescale 1ns/1ps
 `default_nettype none
 
@@ -32,3 +36,4 @@ package fmt_pkg;
     endfunction
 
 endpackage
+`endif

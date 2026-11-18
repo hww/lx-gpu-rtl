@@ -2,7 +2,6 @@
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
-#include <string>
 
 static Vpixel_blender* dut;
 static int errors = 0;
@@ -44,36 +43,43 @@ static void header(const char* t) {
 
 static void result_line(const char* name, int fails_before, const char* info) {
     if (errors == fails_before)
-        printf(CLR_CYN "  %-18s" CLR_RST " -> " CLR_GRN "OK" CLR_RST " (%s)\n",
+        printf(CLR_CYN "  %-20s" CLR_RST " -> " CLR_GRN "OK" CLR_RST " (%s)\n",
                name, info);
     else
-        printf(CLR_CYN "  %-18s" CLR_RST " -> " CLR_RED "TEST FAIL" CLR_RST " (%s)\n",
+        printf(CLR_CYN "  %-20s" CLR_RST " -> " CLR_RED "TEST FAIL" CLR_RST " (%s)\n",
                name, info);
 }
 
 static void reset() {
     dut->rst = 1;
     dut->cyc_i = 0; dut->stb_i = 0; dut->we_i = 0;
-    dut->adr_i = 0; dut->mode_i = 0; dut->pos_i = 0;
+    dut->mode_i = 0; dut->frac_i = 0;
     dut->dat_i = 0; dut->pixel_i = 0; dut->ack_i = 0;
     tick(); tick();
     dut->rst = 0;
     tick();
 }
 
-// read: cyc&stb&~we -> dat_o = pixel, ack_o = 1 (combinational)
-static void do_read(uint8_t mode, uint8_t pos, uint16_t word,
+// read: cyc&stb&~we -> dat_o = pixel (comb), ack_o = ack_i (от кэша)
+static void do_read(uint8_t mode, uint8_t frac, uint16_t word,
                     uint16_t exp_pixel, const char* name) {
     int fb = errors;
-    dut->cyc_i = 1;
-    dut->stb_i = 1;
-    dut->we_i  = 0;
-    dut->adr_i = 0;      // [0]=0 read, [1]=ch (0)
-    dut->mode_i = mode;
-    dut->pos_i  = pos;
-    dut->dat_i  = word;
+    dut->cyc_i   = 1;
+    dut->stb_i   = 1;
+    dut->we_i    = 0;
+    dut->mode_i  = mode;
+    dut->frac_i  = frac;
+    dut->dat_i   = word;
     dut->pixel_i = 0;
-    dut->eval();            // combinational
+    dut->ack_i   = 0;
+    dut->eval();
+
+    // Пока кэш не ответил (ack_i=0), ack_o должен быть 0
+    check_bit("ack_wait", dut->ack_o, 0);
+
+    // Пришёл ответ от кэша (ack_i=1)
+    dut->ack_i = 1;
+    dut->eval();
 
     uint16_t got_pixel = dut->dat_o;
     int      got_ack   = dut->ack_o;
@@ -82,7 +88,7 @@ static void do_read(uint8_t mode, uint8_t pos, uint16_t word,
     check_bit("ack_o", got_ack, 1);
 
     tick();
-    dut->cyc_i = 0; dut->stb_i = 0;
+    dut->cyc_i = 0; dut->stb_i = 0; dut->ack_i = 0;
     dut->eval();
     check_bit("ack_idle", dut->ack_o, 0);
 
@@ -91,18 +97,17 @@ static void do_read(uint8_t mode, uint8_t pos, uint16_t word,
 }
 
 // write: RMW, 2 cache accesses via ack_i handshake
-static void do_write(uint8_t mode, uint8_t pos, uint16_t word, uint16_t pixel,
+static void do_write(uint8_t mode, uint8_t frac, uint16_t word, uint16_t pixel,
                      uint16_t exp_word, const char* name) {
     int fb = errors;
 
-    // start write: cyc&stb&we, adr[0]=1
-    dut->cyc_i = 1;
-    dut->stb_i = 1;
-    dut->we_i  = 1;
-    dut->adr_i = 1;      // [0]=1 write, [1]=ch (0)
-    dut->mode_i = mode;
-    dut->pos_i  = pos;
-    dut->dat_i  = 0;        // old word arrives later
+    // start write: cyc&stb&we
+    dut->cyc_i   = 1;
+    dut->stb_i   = 1;
+    dut->we_i    = 1;
+    dut->mode_i  = mode;
+    dut->frac_i  = frac;
+    dut->dat_i   = 0;
     dut->pixel_i = pixel;
     dut->ack_i   = 0;
     tick();                 // IDLE -> RMW_READ
@@ -129,41 +134,56 @@ static void do_write(uint8_t mode, uint8_t pos, uint16_t word, uint16_t pixel,
     dut->ack_i = 0;
     dut->eval();
 
-    check_bit("ack.write",  dut->ack_o, 1);
+    check_bit("ack.write",     dut->ack_o, 1);
     check_bit("rmw_req.after", dut->rmw_req_o, 0);
     check_bit("rmw_we.after",  dut->rmw_we_o, 0);
 
-    char buf[32]; snprintf(buf, sizeof buf, "word=%04X", exp_word);
+    char buf[32]; snprintf(buf, sizeof buf, "word=%04X", dut->rmw_dat_o);
     result_line(name, fb, buf);
+    tick(); 
 }
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vpixel_blender;
 
-    printf(CLR_BLD "pixel_blender testbench (Wishbone slave)" CLR_RST "\n");
+    printf(CLR_BLD "pixel_blender testbench (New Architecture: frac_i & fmt_pkg)" CLR_RST "\n");
     reset();
 
-    // ===== reads (combinational) =====
-    header("Read (combinational, ack = cyc&stb&~we)");
-    do_read(2, 0, 0xABCD, 0x000A, "4bpp.p0.rd");
-    do_read(2, 3, 0xABCD, 0x000D, "4bpp.p3.rd");
-    do_read(3, 0, 0xABCD, 0x00AB, "8bpp.p0.rd");
-    do_read(0, 0, 0x8000, 0x0001, "1bpp.p0.rd");
-    do_read(1, 0, 0xE400, 0x0003, "2bpp.p0.rd");
-    do_read(4, 0, 0x1234, 0x1234, "16bpp.rd");
-    do_read(5, 0, 0xABCD, 0x00CD, "pass_lo8.rd");
-    do_read(6, 0, 0xABCD, 0x00AB, "pass_hi8.rd");
-    do_read(7, 0, 0x1234, 0x1234, "pass16.rd");
+    // Коды форматов по fmt_pkg:
+    // 0: 16bpp (k=0) | 1: 8bpp (k=1) | 2: 4bpp (k=2)
+    // 3: 2bpp  (k=3) | 4: 1bpp (k=4) | 5: LO8 (k=0) | 6: HI8 (k=0)
+
+    // ===== reads =====
+    header("Read (unpack from frac_i, ack_o = ack_i)");
+    do_read(0, 0x0, 0x1234, 0x1234, "16bpp.rd");
+    do_read(1, 0x0, 0xABCD, 0x00AB, "8bpp.p0.rd");
+    do_read(1, 0x8, 0xABCD, 0x00CD, "8bpp.p1.rd");
+    do_read(2, 0x0, 0xABCD, 0x000A, "4bpp.p0.rd");
+    do_read(2, 0x4, 0xABCD, 0x000B, "4bpp.p1.rd");
+    do_read(2, 0x8, 0xABCD, 0x000C, "4bpp.p2.rd");
+    do_read(2, 0xC, 0xABCD, 0x000D, "4bpp.p3.rd");
+    do_read(3, 0x0, 0xE400, 0x0003, "2bpp.p0.rd");
+    do_read(3, 0x2, 0xE400, 0x0002, "2bpp.p1.rd");
+    do_read(4, 0x0, 0x8000, 0x0001, "1bpp.p0.rd");
+    do_read(4, 0x1, 0x8000, 0x0000, "1bpp.p1.rd");
+    do_read(5, 0x0, 0xABCD, 0x00CD, "lo8.rd");
+    do_read(6, 0x0, 0xABCD, 0x00AB, "hi8.rd");
 
     // ===== writes (RMW) =====
-    header("Write (RMW, 2 cache accesses via ack_i)");
-    do_write(2, 0, 0xABCD, 0x0005, 0x5BCD, "4bpp.p0.wr");
-    do_write(2, 3, 0xABCD, 0x0005, 0xABC5, "4bpp.p3.wr");
-    do_write(3, 0, 0xABCD, 0x0012, 0x12CD, "8bpp.p0.wr");
-    do_write(4, 0, 0xABCD, 0x1234, 0x1234, "16bpp.wr");
-    do_write(5, 0, 0xABCD, 0x0012, 0xAB12, "pass_lo8.wr");
-    do_write(6, 0, 0xABCD, 0x0012, 0x12CD, "pass_hi8.wr");
+    header("Write (RMW & Write-Protect for 1bpp/2bpp)");
+    do_write(0, 0x0, 0xABCD, 0x1234, 0x1234, "16bpp.wr");
+    do_write(1, 0x0, 0xABCD, 0x0012, 0x12CD, "8bpp.p0.wr");
+    do_write(1, 0x8, 0xABCD, 0x0012, 0xAB12, "8bpp.p1.wr");
+    do_write(2, 0x0, 0xABCD, 0x0005, 0x5BCD, "4bpp.p0.wr");
+    do_write(2, 0x8, 0xABCD, 0x0005, 0xAB5D, "4bpp.p2.wr");
+    do_write(2, 0xC, 0xABCD, 0x0005, 0xABC5, "4bpp.p3.wr");
+    do_write(5, 0x0, 0xABCD, 0x0012, 0xAB12, "lo8.wr");
+    do_write(6, 0x0, 0xABCD, 0x0012, 0x12CD, "hi8.wr");
+
+    // Проверка запрета записи (wr_en = 0) для 2bpp (mode=3) и 1bpp (mode=4)
+    do_write(3, 0x0, 0xE400, 0x0000, 0xE400, "2bpp.wr_prot");
+    do_write(4, 0x0, 0x8001, 0x0000, 0x8001, "1bpp.wr_prot");
 
     // ===== summary =====
     printf("\n" CLR_BLD);

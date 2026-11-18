@@ -246,7 +246,7 @@ module top (
         .wdata_i(alu_result),
         .data_req_i(t_ch_data_req), .data_we_i(t_ch_data_we),
         .data_ack_o(ch_data_ack), .data_rdata_o(ch_data_rdata),
-        .flush_req_i(t_ch_flush_req), .flush_mask_i(x_addr[3:0]),
+        .flush_req_i(t_ch_flush_req), .flush_sel_i(x_addr[2:0]),
         .flush_ack_o(ch_flush_ack),
         .status_o(ch_status), .error_o(ch_error),
         .wb_cyc_o(wb_cyc_o), .wb_stb_o(wb_stb_o), .wb_we_o(wb_we_o),

@@ -6,7 +6,7 @@ PACKAGE  := CABGA256
 LPF      := icesugar_pro.lpf
 BUILD    := build
 
-RTL := rtl/regfile.sv rtl/alu.sv rtl/pixel_blender.sv rtl/pixel_engine.sv \
+RTL := rtl/fmt_pkg.sv rtl/alu.sv rtl/regfile.sv rtl/cond_eval.sv rtl/fetch_unit.sv rtl/microcode_rom.sv \
        rtl/gpu_cache.sv rtl/gpu_host.sv rtl/sequencer.sv rtl/microcode_rom.sv \
        rtl/top.sv rtl/top_fpga.sv
 TOP := top_fpga
@@ -86,7 +86,7 @@ sim-pixel-engine: | $(BUILD)
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module pixel_engine -Mdir $(CURDIR)/$(BUILD)/sim_pixel_engine \
-	    rtl/pixel_engine.sv $(CURDIR)/sim/tb_pixel_engine.cpp
+	    rtl/fmt_pkg.sv rtl/pixel_engine.sv $(CURDIR)/sim/tb_pixel_engine.cpp
 	./$(BUILD)/sim_pixel_engine/Vpixel_engine
 
 sim-pixel-blender: | $(BUILD)
@@ -95,10 +95,10 @@ sim-pixel-blender: | $(BUILD)
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module pixel_blender -Mdir $(CURDIR)/$(BUILD)/sim_pixel_blender \
-	    rtl/pixel_blender.sv $(CURDIR)/sim/tb_pixel_blender.cpp
+	    rtl/fmt_pkg.sv rtl/pixel_blender.sv $(CURDIR)/sim/tb_pixel_blender.cpp
 	./$(BUILD)/sim_pixel_blender/Vpixel_blender
 
-sim-gpu-cache: | $(BUILD)
+sim-cache: | $(BUILD)
 	mkdir -p $(BUILD)/sim_gpu_cache
 	verilator --cc --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
@@ -128,24 +128,16 @@ sim-cond: | $(BUILD)
 
 
 sim-channel: | $(BUILD)
-	mkdir -p $(BUILD)/sim_channel
-	verilator --cc --exe --build -j 1 -DSIMULATION \
-	    -CFLAGS "-I$(CURDIR)/tools" \
-	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
-	    --top-module tb_channel -Mdir $(CURDIR)/$(BUILD)/sim_channel \
-	    rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv \
-	    sim/tb_channel.sv $(CURDIR)/sim/tb_channel.cpp
-	./$(BUILD)/sim_channel/Vtb_channel
-
-sim-ch: | $(BUILD)
 	mkdir -p $(BUILD)/tb_channel_unit
 	verilator --cc --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
+	    --trace \
 	    --top-module channel_unit -Mdir $(CURDIR)/$(BUILD)/tb_channel_unit \
-	    rtl/channel_unit.sv rtl/pixel_engine.sv rtl/gpu_cache.sv \
+	    rtl/fmt_pkg.sv rtl/channel_unit.sv rtl/pixel_engine.sv rtl/pixel_blender.sv rtl/gpu_cache.sv \
 	    $(CURDIR)/sim/tb_channel_unit.cpp
 	./$(BUILD)/tb_channel_unit/Vchannel_unit
+
 
 # ================================================================
 # synth / pnr / bit (без asm/pack)
