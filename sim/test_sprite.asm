@@ -40,5 +40,5 @@ skip_pixel:
         SUB     R1, #1           ; PC=0x03B: уменьшаем счётчик строк
         JMP.NE  row_loop         ; PC=0x03C: повторяем 16 строк
 
-        FLUSH   2                ; PC=0x03D: сброс кэша канала 1 в RAM
+        FLUSH   1                ; PC=0x03D: сброс кэша канала 1 в RAM
         HALT                     ; PC=0x03E
