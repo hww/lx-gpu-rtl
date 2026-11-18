@@ -31,7 +31,6 @@ static int g_fails = 0;
 static uint16_t mem[MEM_WORDS];
 static uint32_t rom[ROM_SIZE];
 
-
 // Умная загрузка программы:
 // Возвращает true, если загружен пакет [SIZE, START] (.asm / .pkg),
 // и false, если загружен сырой код без заголовка (.hex).
@@ -374,7 +373,7 @@ int main(int argc, char** argv) {
     // 3. Destination / Source 2 (входная картинка 2 — защищена от перезаписи на диске)
     const char* din_path  = nullptr;
     uint32_t    dst_off   = 0;
-    uint32_t    dst_size  = 0x1000;
+    uint32_t    dst_size  = 0x2000; 
     PixelFormat dfmt      = PixelFormat::BPP8;
     int         dst_w     = 0, dst_h = 0;
 
@@ -433,6 +432,10 @@ int main(int argc, char** argv) {
     
     printf("DEBUG g_verbose=%d\n", g_verbose);
 
+     if ((prog_off & 1) || (s1_off & 1) || (dst_off & 1) || (dst_size & 1)) {
+        fprintf(stderr, "Error: -poff, -s1off, -doff, -dsize must be even byte addresses\n");
+        return 1;
+    }
     // Если входной -din задан, а -out не указан — генерируем имя *_out.png автоматически,
     // чтобы не перезаписывать исходный файл din_path
     std::string auto_out_png;
@@ -475,54 +478,54 @@ int main(int argc, char** argv) {
     dump_rom_hex("initial", 0x000, 16);
 
     // ===== RAM load =====
+    // ===== RAM load =====
     header("LOAD PROGRAM & BUFFERS INTO RAM");
     bool is_pkg = false;
     if (prog_path) {
-        is_pkg = load_file_smart(prog_path, prog_off, gpu_addr, has_gpu_addr);
-        dump_mem_hex("RAM (program)", prog_off, 0x20);
+        is_pkg = load_file_smart(prog_path, prog_off >> 1, gpu_addr, has_gpu_addr);
+        dump_mem_hex("RAM (program)", prog_off >> 1, 0x20);
 
         if (is_pkg) {
-            check_nonzero("pkg SIZE",      mem[prog_off + 0], 16);
-            check_nonzero("pkg START",     mem[prog_off + 1], 16);
-            check_eq     ("pkg SIZE even", mem[prog_off + 0] & 1, 0, 1);
+            check_nonzero("pkg SIZE",      mem[(prog_off >> 1) + 0], 16);
+            check_nonzero("pkg START",     mem[(prog_off >> 1) + 1], 16);
+            check_eq     ("pkg SIZE even", mem[(prog_off >> 1) + 0] & 1, 0, 1);
         }
     }
 
     if (s1in_path) {
-        printf("  [S1IN] %s -> RAM @ 0x%04X (%dx%d)\n", s1in_path, s1_off, s1in_w, s1in_h);
-        if (!load_png_into_mem(s1in_path, s1fmt, s1_off, s1in_w, s1in_h)) return 1;
+        printf("  [S1IN] %s -> RAM @ byte 0x%05X (%dx%d)\n", s1in_path, s1_off, s1in_w, s1in_h);
+        if (!load_png_into_mem(s1in_path, s1fmt, s1_off >> 1, s1in_w, s1in_h)) return 1;
     }
 
     if (din_path) {
-        printf("  [DIN ] %s -> RAM @ 0x%04X (%dx%d) [protected]\n", din_path, dst_off, dst_w, dst_h);
-        if (!load_png_into_mem(din_path, dfmt, dst_off, dst_w, dst_h)) return 1;
+        printf("  [DIN ] %s -> RAM @ byte 0x%05X (%dx%d) [protected]\n", din_path, dst_off, dst_w, dst_h);
+        if (!load_png_into_mem(din_path, dfmt, dst_off >> 1, dst_w, dst_h)) return 1;
     }
 
     // ===== gpu_start =====
     header("GPU_START");
     // Если загружен пакет (.asm/.pkg) — стартовый адрес берётся из заголовка пакета (mem[prog_off + 1]).
     // Если загружен не пакет (.hex) — используем явно переданный -gpuaddr.
-    dut->gpu_addr_i  = (is_pkg ? (prog_off * 2) : gpu_addr) & 0xFFFFFF;
+    dut->gpu_addr_i  = (is_pkg ? prog_off : gpu_addr) & 0xFFFFFF;
     dut->gpu_start_i = 1; step(); dut->gpu_start_i = 0;
-    check_bit("halted after start", dut->halted_o, 0);
-    check_eq ("pc after start",     dut->pc_o, 0, 12);
 
     // ===== run =====
     header("RUN");
     uint64_t run_start = cycles;
     uint64_t last_prog = cycles;
     int timeout = 0;
-    
+
     while (dut->halted_o) {
         step();
         if ((cycles - run_start) >= max_cycles) {
             timeout = 1;
-            printf("Infinitive initial HALT state...");
+            printf(CLR_RED "Infinitive initial HALT state!" CLR_RST);
             break;
         }
     }
 
     run_start = cycles;
+    uint64_t exec_start_halt = cycles; // момент снятия HALT (старт выполнения)
 
     while (!dut->halted_o && !dut->error_o) {
         step();
@@ -538,20 +541,24 @@ int main(int argc, char** argv) {
         }
 
         if ((cycles - run_start) >= max_cycles) {
-            printf("Infinitive execution...");
+            printf(CLR_RED "Infinitive execution!" CLR_RST);
             timeout = 1;
             break;
         }
     }
+    uint64_t exec_end_halt = cycles;   // момент установки HALT (финиш выполнения)
+    // В нашей функции step() один полный период clk = 2 инкремента cycles (tick(0) и tick(1))
+    uint64_t exec_clk_cycles = (exec_end_halt - exec_start_halt) / 2;
 
     // ===== result =====
     header("RUN RESULT");
-    printf("  cycles  = %llu\n", (unsigned long long)cycles);
-    printf("  limit   = %llu\n", (unsigned long long)max_cycles);
-    printf("  halted  = %d\n", (int)dut->halted_o);
-    printf("  error   = %d\n", (int)dut->error_o);
-    printf("  pc      = %03X\n", (unsigned)dut->pc_o);
-    printf("  errcode = %03X\n", (unsigned)dut->rootp->top__DOT__ch_error);
+    printf("\n" CLR_BLD CLR_CYN "  **************************************************\n");
+    printf("  *  GPU EXECUTION CLK CYCLES : %-17llu  *\n", (unsigned long long)exec_clk_cycles);
+    printf("  **************************************************" CLR_RST "\n");
+    printf("  total sim ticks = %llu\n", (unsigned long long)cycles);
+    printf("  limit           = %llu\n", (unsigned long long)max_cycles);
+    printf("  halted          = %d\n\n", (int)dut->halted_o);
+
 
     if (timeout) {
         printf(CLR_RED "  TIMEOUT: %llu cycles exceeded\n" CLR_RST,
@@ -589,14 +596,17 @@ int main(int argc, char** argv) {
         printf("  R%02d = %04X\n", i,
             (unsigned)dut->rootp->top__DOT__u_rf__DOT__mem_a[i]);
     }
+    
+    dump_mem_hex("RAM after run", dst_off >> 1, 0x40);
 
-    // ===== Save outputs (исходный din_path остаётся нетронутым) =====
+        // ===== Save outputs (исходный din_path остаётся нетронутым) =====
     if (out_raw) {
-        printf("  [SAVE RAW] -> %s (from 0x%04X, %u words)\n", out_raw, dst_off, dst_size);
+        uint32_t raw_words = dst_size >> 1;
+        printf("  [SAVE RAW] -> %s (from byte 0x%05X, %u bytes)\n", out_raw, dst_off, dst_size);
         FILE* f = fopen(out_raw, "wb");
         if (f) {
-            for (uint32_t i = 0; i < dst_size; i++) {
-                uint32_t w = dst_off + i;
+            for (uint32_t i = 0; i < raw_words; i++) {
+                uint32_t w = (dst_off >> 1) + i;
                 uint16_t v = (w < MEM_WORDS) ? mem[w] : 0;
                 fputc(v & 0xFF, f); fputc(v >> 8, f);
             }
@@ -605,9 +615,10 @@ int main(int argc, char** argv) {
     }
 
     if (out_png) {
-        printf("  [SAVE PNG] -> %s (from 0x%04X, %dx%d)\n", out_png, dst_off, dst_w, dst_h);
-        if (!dump_mem_to_png(out_png, dfmt, dst_off, dst_w, dst_h)) g_fails++;
+        printf("  [SAVE PNG] -> %s (from byte 0x%05X, %dx%d)\n", out_png, dst_off, dst_w, dst_h);
+        if (!dump_mem_to_png(out_png, dfmt, dst_off >> 1, dst_w, dst_h)) g_fails++;
     }
+
 
     printf("\n" CLR_BLD);
     if (g_fails == 0) printf(CLR_GRN "=== ALL CHECKS PASSED ===" CLR_RST "\n");

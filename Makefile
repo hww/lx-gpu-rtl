@@ -48,27 +48,28 @@ top: asm $(wildcard tools/*.h) | $(BUILD)
 		$(CURDIR)/sim/main_top.cpp $(CURDIR)/sim/image_io.cpp
 
 sim-top: top
-	./$(BUILD)/sim_top/Vtop -trace -prog sim/test_alu.asm -gpuaddr 32
-
-sim-top-v: top
-	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_sprite.asm -gpuaddr 32
-
-sim-top-alu-v: top
 	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_alu.asm -gpuaddr 32
 
-sim-top-sprite: top
+sim-top-alu: top
+	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_alu.asm -gpuaddr 32
+
+sim-channel-wr: top
+	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_channel_write.asm -gpuaddr 32
+
+sim-loop: top
+	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_loop.asm -gpuaddr 32
+
+sim-outer-loop: top
+	./$(BUILD)/sim_top/Vtop -v -trace -prog sim/test_outer_loop.asm -gpuaddr 32
+
+sim-sprite: top
 	./$(BUILD)/sim_top/Vtop \
 	    -trace \
 		-prog sim/test_sprite.asm -gpuaddr 32 \
-		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0400 \
+		-s1in images/sprite01_16x16_8bpp.png -s1fmt 8bpp -s1w 16 -s1h 16 -s1off 0x0400 \
+		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0800 \
 		-out images/output.png
 
-sim-top-sprite-v: top
-	./$(BUILD)/sim_top/Vtop \
-	    -v -trace \
-		-prog sim/test_sprite.asm -gpuaddr 32 -maxcycles 30000 \
-		-din images/bg01_320x200_8bpp.png -dfmt 8bpp -dw 320 -dh 200 -doff 0x0400 \
-		-out images/output.png	
 
 # ---- остальные sim-* (модульные тесты) ----
 sim-alu: | $(BUILD)

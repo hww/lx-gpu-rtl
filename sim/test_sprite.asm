@@ -1,27 +1,44 @@
 .org 0x20
-        ; --- Канал 0 (спрайт 8bpp, страница 2) ---
-        LDI     R5, #0x0302      ; FMT=3 (8bpp), PAGE=2
-        MOV     PAGE0, R5
-        LDI     R5, #1           ; STEP0 = 16 (1 слово)
-        MOV     STEP0, R5
-        MOV     IDXH0, #0
-        LDI     R4, #0x0022      ; IDX0 = 0x22 (начало спрайта в RAM)
-        MOV     IDX0, R4
+        ; --- Канал 0: источник (спрайт 16x16 по адресу 0x0400) ---
+        LDI     R5, #0x0100      ; PC=0x020: FMT=1 (8bpp), PAGE=0
+        MOV     PAGE0, R5        ; PC=0x021
+        LDI     R5, #1           ; PC=0x022: STEP0 = 1 пиксель
+        MOV     STEP0, R5        ; PC=0x023
+        MOV     IDXH0, #0        ; PC=0x024
+        LDI     R4, #0x0400      ; PC=0x025: IDX0 = 0x0400
+        MOV     IDX0, R4         ; PC=0x026
 
-        ; --- Канал 1 (framebuffer 8bpp, страница 2) ---
-        LDI     R5, #0x0302      ; FMT=3 (8bpp), PAGE=2
-        MOV     PAGE1, R5
-        LDI     R5, #1           ; STEP1 = 1
-        MOV     STEP1, R5
-        MOV     IDXH1, #0
-        MOV     IDX1, #0         ; IDX1 = 0 (куда пишем)
+        ; --- Канал 1: экран 320x200 (база 0x0800) ---
+        LDI     R5, #0x0100      ; PC=0x027: FMT=1 (8bpp), PAGE=0
+        MOV     PAGE1, R5        ; PC=0x028
+        LDI     R5, #1           ; PC=0x029: STEP1 = 1 пиксель
+        MOV     STEP1, R5        ; PC=0x02A
+        MOV     IDXH1, #0        ; PC=0x02B
 
-        ; --- Цикл ---
-        LDI     R0, #256          ; 128 слов (256 пикселей / 2)
-draw_loop:
-        MOV     R2, DATA0
-        MOV     DATA1, R2
-        SUB     R0, #1
-        JMP.NE  draw_loop
-        FLUSH 3                  ; Сброс каналов 0 и 1 (маска 0011)
-        HALT
+        ; --- Настройка координат и аппаратного цикла ---
+        LDI     R3, #0x8564      ; PC=0x02C: (X=100, Y=100) -> 0x0800 + 100*320 + 100
+        LDI     R6, #320         ; PC=0x02D: ширина экрана
+        LDI     R1, #16          ; PC=0x02E: внешний счётчик: 16 строк
+        LDI     R0, #16          ; PC=0x02F: ширина спрайта: 16 пикселей
+        LDI     R4, #0x0034      ; PC=0x030: адрес col_loop (PC=0x034)
+        MOV     LOOP_TGT, R4     ; PC=0x031
+
+row_loop:
+        MOV     R7, R3           ; PC=0x032: R7 = текущий адрес пикселя в строке
+        MOV     LOOP_CNT, R0     ; PC=0x033: запуск аппаратного цикла на 16 пикселей
+
+col_loop:
+        MOV     R2, DATA0        ; PC=0x034: читаем пиксель спрайта
+        OR      R2, R2           ; PC=0x035: проверяем на прозрачность (0)
+        JMP.EQ  skip_pixel       ; PC=0x036: если 0 — пропускаем запись
+        MOV     IDX1, R7         ; PC=0x037: ставим адрес приёмника
+        MOV     DATA1, R2        ; PC=0x038: пишем непрозрачный пиксель
+skip_pixel:
+      L ADD     R7, #1           ; PC=0x039: конец тела цикла (L-префикс!) -> возврат на 0x034
+
+        ADD     R3, R6           ; PC=0x03A: следующая строка экрана (R3 += 320)
+        SUB     R1, #1           ; PC=0x03B: уменьшаем счётчик строк
+        JMP.NE  row_loop         ; PC=0x03C: повторяем 16 строк
+
+        FLUSH   2                ; PC=0x03D: сброс кэша канала 1 в RAM
+        HALT                     ; PC=0x03E

@@ -132,18 +132,13 @@ module channel_unit (
     logic        cache_we;
     logic [15:0] cache_wdata;
 
-    assign cache_stb = pe_idx_valid && !cache_ack && !req_done_r &&
-                     (data_we_i ? blend_rmw_req : data_req_i);
+    assign cache_stb = pe_idx_valid && !cache_ack &&
+                   (data_we_i ? blend_rmw_req : data_req_i);
+
 
 
     assign cache_we    = data_we_i ? blend_rmw_we  : 1'b0;
     assign cache_wdata = blend_rmw_dat;
-
-    logic req_done_r;
-    always_ff @(posedge clk) begin
-        if (rst || !data_req_i) req_done_r <= 1'b0;
-        else if (blend_ack)     req_done_r <= 1'b1;
-    end
 
 
     // --- Инстанс pixel_engine ---
@@ -167,8 +162,8 @@ module channel_unit (
     // --- Инстанс pixel_blender ---
     pixel_blender u_blender (
         .clk(clk), .rst(rst),
-        .cyc_i(data_req_i && pe_idx_valid && !req_done_r),
-        .stb_i(data_req_i && pe_idx_valid && !req_done_r),
+        .cyc_i(data_req_i && pe_idx_valid),
+        .stb_i(data_req_i && pe_idx_valid),
         .we_i(data_we_i),
         .mode_i(pe_mode),
         .frac_i(pe_frac),
@@ -188,7 +183,7 @@ module channel_unit (
         .ch_sel_i(ch_sel),
         .ch_addr_i(pe_word),
         .ch_stb_i(cache_stb),
-        .ch_prefetch_i(pe_prefetch),
+        .ch_prefetch_i(pe_prefetch  && pe_idx_valid),
         .ch_we_i(cache_we),
         .ch_dat_i(cache_wdata),
         .ch_hit_o(cache_hit),
@@ -212,8 +207,8 @@ module channel_unit (
 
     // --- Handshake для процессора и сдвига IDX (строго 1 импульс на запрос) ---
 
-    assign pe_access_done = blend_ack && !req_done_r;
-    assign data_ack_o     = blend_ack && !req_done_r;
+    assign pe_access_done = blend_ack;
+    assign data_ack_o     = blend_ack;
     assign data_rdata_o   = blend_dat;
     assign flush_ack_o    = cache_flush_done;
     assign status_o       = {3'b0, pe_page_ovf};
