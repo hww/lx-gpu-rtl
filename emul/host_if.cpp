@@ -21,6 +21,11 @@ uint8_t HostIf::read(uint8_t addr) {
             uint8_t err = gpu_.error() ? (gpu_.halt_code() & 0x7F) : 0x00;
             return h | err;
         }
+        case 5: {                       // IRQ_CODE: reading acknowledges
+            uint8_t code = gpu_.irq_code();
+            gpu_.ack_irq();
+            return code;
+        }
         default: return 0x00;
     }
 }
