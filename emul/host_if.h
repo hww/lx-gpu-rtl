@@ -10,7 +10,7 @@ public:
     explicit HostIf(GpuTop& gpu) : gpu_(gpu) { reset(); }
 
     void    reset();
-    uint8_t read(uint8_t addr);
+    uint8_t read(uint8_t addr);         // 5 = IRQ_CODE, acknowledges the IRQ
     void    write(uint8_t addr, uint8_t data);
 
     uint32_t gpu_addr() const {

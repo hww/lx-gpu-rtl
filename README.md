@@ -24,6 +24,9 @@ Architecture specification: [XiAleste / Aleste LX GPU Documentation](https://hww
 - **ROM Bootloader**:
   - Permanently resides in protected ROM words `0..31` (`boot/bootloader.asm`; writes to `0..31` halt with error code `1`).
   - On `GPU_START`, hardware preloads `CH0` (`16 bpp`, `STEP=1`) to the host packet address, copies `[SIZE, START, payload...]` into microcode ROM via `ROMA`/`ROML`/`ROMH`, and jumps to `START`.
+- **Host interface** (`host_if`, 8-bit Wishbone slave):
+  - `0..2` `GPU_ADDR` (W/R), `3` `COMMAND` (`1` = `GPU_START`, `2` = `GPU_RESET`), `4` `STATUS` (R: bit 7 halted, bits 6..0 error code).
+  - `5` `IRQ_CODE` (R): the 8-bit code of the last `IRQ` instruction; reading it acknowledges the interrupt (`irq_o` drops). `GPU_START` and `GPU_RESET` also clear a pending interrupt.
 
 ## Microcode Example
 

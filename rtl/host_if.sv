@@ -9,9 +9,12 @@
 //   2  GPU_ADDR2   [23:16]   W
 //   3  COMMAND     [1:0]     W   (0=NOP, 1=START, 2=RESET)
 //   4  STATUS      [7:0]     R   (bit7=HALT, bits6:0=RESULT)
+//   5  IRQ_CODE    [7:0]     R   (code of the last IRQ instruction;
+//                                 reading it acknowledges the interrupt)
 //
-// gpu_start_o : 1-cycle pulse, gpu_addr_o latched
-// gpu_reset_o : 1-cycle pulse
+// gpu_start_o   : 1-cycle pulse, gpu_addr_o latched
+// gpu_reset_o   : 1-cycle pulse
+// gpu_irq_ack_o : 1-cycle pulse when IRQ_CODE is read
 module host_if (
     input  logic        clk,
     input  logic        rst,
@@ -33,7 +36,11 @@ module host_if (
     // GPU status
     input  logic        gpu_halted_i,
     input  logic        gpu_error_i,
-    input  logic [11:0] gpu_error_code_i
+    input  logic [11:0] gpu_error_code_i,
+
+    // GPU interrupt
+    input  logic [7:0]  gpu_irq_code_i,
+    output logic        gpu_irq_ack_o
 );
 
     logic [7:0]  addr0_r, addr1_r, addr2_r;
@@ -83,6 +90,9 @@ module host_if (
     assign gpu_start_o = start_r;
     assign gpu_reset_o = reset_r;
 
+    // ===== IRQ_CODE read: acknowledge once per access =====
+    assign gpu_irq_ack_o = sel && !wb_we_i && (wb_adr_i == 8'd5) && !ack_r;
+
     // ===== STATUS read =====
     always_comb begin
         wb_dat_o = 8'h00;
@@ -93,6 +103,7 @@ module host_if (
             8'd3: wb_dat_o = {6'h0, cmd_r};
             8'd4: wb_dat_o = {gpu_halted_i,
                               gpu_error_i ? gpu_error_code_i[6:0] : 7'h0};
+            8'd5: wb_dat_o = gpu_irq_code_i;
             default: wb_dat_o = 8'h00;
         endcase
     end

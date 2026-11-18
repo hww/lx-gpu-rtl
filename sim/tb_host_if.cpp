@@ -90,6 +90,7 @@ static void reset() {
     dut->gpu_halted_i = 0;
     dut->gpu_error_i = 0;
     dut->gpu_error_code_i = 0;
+    dut->gpu_irq_code_i = 0;
     tick(); tick();
     dut->rst = 0;
     tick();
@@ -239,6 +240,42 @@ int main(int argc, char** argv) {
         test_fail("unknown", d, 0, 8);
         char buf[32]; snprintf(buf, sizeof buf, "dat=%02X", d);
         result_line("unknown", fb, buf);
+    }
+
+    // ===== 11. IRQ_CODE: read returns the code and pulses gpu_irq_ack_o once =====
+    header("IRQ_CODE read + auto-ack");
+    {
+        int fb = errors;
+        dut->gpu_irq_code_i = 0x5A;
+        // a write to register 5 must not acknowledge
+        int acks_w = 0;
+        dut->wb_cyc_i = 1; dut->wb_stb_i = 1; dut->wb_we_i = 1;
+        dut->wb_adr_i = 5; dut->wb_dat_i = 0xFF;
+        for (int i = 0; i < 3 && !dut->wb_ack_o; i++) {
+            dut->eval(); if (dut->gpu_irq_ack_o) acks_w++;
+            tick();
+        }
+        dut->wb_cyc_i = 0; dut->wb_stb_i = 0; dut->wb_we_i = 0;
+        tick();
+        test_fail("ack on write", acks_w, 0, 8);
+        // one read -> the code and exactly one ack pulse
+        int acks_r = 0;
+        dut->wb_cyc_i = 1; dut->wb_stb_i = 1; dut->wb_we_i = 0;
+        dut->wb_adr_i = 5;
+        dut->eval();
+        while (!dut->wb_ack_o) {
+            if (dut->gpu_irq_ack_o) acks_r++;
+            tick(); dut->eval();
+        }
+        if (dut->gpu_irq_ack_o) acks_r++;
+        uint8_t d = dut->wb_dat_o;
+        dut->wb_cyc_i = 0; dut->wb_stb_i = 0;
+        tick(); dut->eval();
+        if (dut->gpu_irq_ack_o) acks_r++;
+        test_fail("irq_code", d, 0x5A, 8);
+        test_fail("ack pulses", acks_r, 1, 8);
+        char buf[48]; snprintf(buf, sizeof buf, "code=%02X acks=%d", d, acks_r);
+        result_line("irq_code", fb, buf);
     }
 
     // ===== summary =====

@@ -13,6 +13,7 @@ module gpu_fpga (
     input  logic [7:0]  wbs_dat_i,
     output logic [7:0]  wbs_dat_o,
     output logic        wbs_ack_o,
+    output logic        irq_o,          // GPU interrupt (IRQ instruction)
 
     // memory Wishbone master (wbm, 16-bit) -> SDRAM
     output logic        wbm_cyc_o,
@@ -42,6 +43,8 @@ module gpu_fpga (
     // ===== host interface =====
     logic        gpu_start, gpu_reset;
     logic [23:0] gpu_addr;
+    logic        gpu_irq_ack;
+    logic [7:0]  gpu_irq_code;
 
     host_if u_host (
         .clk(clk), .rst(rst),
@@ -51,7 +54,9 @@ module gpu_fpga (
         .gpu_start_o(gpu_start), .gpu_reset_o(gpu_reset), .gpu_addr_o(gpu_addr),
         .gpu_halted_i(gpu_halted),
         .gpu_error_i(gpu_error),
-        .gpu_error_code_i({5'd0, gpu_halt_code})
+        .gpu_error_code_i({5'd0, gpu_halt_code}),
+        .gpu_irq_code_i(gpu_irq_code),
+        .gpu_irq_ack_o(gpu_irq_ack)
     );
 
     // ===== GPU top =====
@@ -70,6 +75,9 @@ module gpu_fpga (
         .gpu_start_i(gpu_start),
         .gpu_reset_i(gpu_reset),
         .gpu_addr_i(gpu_addr),
+        .irq_ack_i(gpu_irq_ack),
+        .irq_o(irq_o),
+        .irq_code_o(gpu_irq_code),
         .wb_cyc_o(wbm_cyc_g), .wb_stb_o(wbm_stb_g), .wb_we_o(wbm_we_g),
         .wb_adr_o(wbm_adr_g), .wb_dat_o(wbm_dat_o_g),
         .wb_dat_i(wbm_dat_i), .wb_ack_i(wbm_ack_g)

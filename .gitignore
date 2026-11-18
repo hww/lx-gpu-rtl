@@ -68,3 +68,7 @@ build/
 
 # Combiner artefacts
 combined_code.txt
+# Built by emul/Makefile
+emul/sim
+emul/sim-debug
+emul/t
