@@ -36,7 +36,7 @@ dis: tools/dis.cpp tools/disasm.h tools/isa.h | $(BUILD)
 # ================================================================
 gpu-top: asm $(wildcard tools/*.h) | $(BUILD)
 	mkdir -p $(BUILD)/sim_top
-	verilator --cc --exe --build -j 1 \
+	verilator --cc -Irtl --exe --build -j 1 \
 		-DSIMULATION \
 		-CFLAGS "-I$(CURDIR)/tools -I$(CURDIR)/third_party/stb -I$(CURDIR)/sim" \
 		-Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE -Wno-UNOPTFLAT \
@@ -76,7 +76,7 @@ sim-sprite: gpu-top
 # ================================================================
 core-alu: | $(BUILD)
 	mkdir -p $(BUILD)/sim_core_alu
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module core_alu -Mdir $(CURDIR)/$(BUILD)/sim_core_alu \
@@ -85,7 +85,7 @@ core-alu: | $(BUILD)
 
 ch-addr-gen: | $(BUILD)
 	mkdir -p $(BUILD)/sim_addr_gen
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module ch_addr_gen -Mdir $(CURDIR)/$(BUILD)/sim_addr_gen \
@@ -94,7 +94,7 @@ ch-addr-gen: | $(BUILD)
 
 ch-blender: | $(BUILD)
 	mkdir -p $(BUILD)/sim_blender
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module ch_blender -Mdir $(CURDIR)/$(BUILD)/sim_blender \
@@ -103,7 +103,7 @@ ch-blender: | $(BUILD)
 
 ch-cache: | $(BUILD)
 	mkdir -p $(BUILD)/sim_cache
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module ch_cache -Mdir $(CURDIR)/$(BUILD)/sim_cache \
@@ -112,7 +112,7 @@ ch-cache: | $(BUILD)
 
 ch-top: | $(BUILD)
 	mkdir -p $(BUILD)/sim_channel
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --trace \
@@ -123,7 +123,7 @@ ch-top: | $(BUILD)
 
 core-fetch: | $(BUILD)
 	mkdir -p $(BUILD)/sim_fetch
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module core_fetch -Mdir $(CURDIR)/$(BUILD)/sim_fetch \
@@ -132,7 +132,7 @@ core-fetch: | $(BUILD)
 
 core-cond: | $(BUILD)
 	mkdir -p $(BUILD)/sim_cond
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module core_cond -Mdir $(CURDIR)/$(BUILD)/sim_cond \
@@ -141,7 +141,7 @@ core-cond: | $(BUILD)
 
 host-if: | $(BUILD)
 	mkdir -p $(BUILD)/sim_host
-	verilator --cc --exe --build -j 1 -DSIMULATION \
+	verilator --cc -Irtl --exe --build -j 1 -DSIMULATION \
 	    -CFLAGS "-I$(CURDIR)/tools" \
 	    -Wno-fatal -Wno-TIMESCALEMOD -Wno-MULTITOP -Wno-UNUSEDSIGNAL -Wno-EOFNEWLINE \
 	    --top-module host_if -Mdir $(CURDIR)/$(BUILD)/sim_host \
@@ -156,13 +156,13 @@ host-if: | $(BUILD)
 # ================================================================
 synth: | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/synth.log -p \
-	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
+	    "read_verilog -sv -Irtl $(RTL); hierarchy -top $(TOP); synth_ecp5 -json $(BUILD)/$(TOP).json -no-rw-check; tee -q -o $(BUILD)/stat_flat.txt stat"
 	@echo "=== flat stat ==="
 	@cat $(BUILD)/stat_flat.txt
 
 stat: | $(BUILD)
 	$(YOSYS) -q -l $(BUILD)/stat_hier.log -p \
-	    "read_verilog -sv $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
+	    "read_verilog -sv -Irtl $(RTL); hierarchy -top $(TOP); synth_ecp5 -noflatten -no-rw-check; tee -q -o $(BUILD)/stat_hier.txt stat -top $(TOP)"
 	@echo "=== hierarchical stat ==="
 	@cat $(BUILD)/stat_hier.txt
 

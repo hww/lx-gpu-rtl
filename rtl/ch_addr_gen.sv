@@ -1,9 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module ch_addr_gen
-    import gpu_fmt_pkg::*;
-(
+module ch_addr_gen (
     input  logic        clk,
     input  logic        rst,
 
@@ -32,15 +30,20 @@ module ch_addr_gen
     output logic        idx_valid_o
 );
 
+    `include "rtl/gpu_fmt_pkg.sv"
+
     localparam int NUM_CH = 4;
 
     logic [2:0] mode_r [0:NUM_CH-1];
     logic [2:0] idxh_r [0:NUM_CH-1];
 
     logic [2:0] mode_load;
+    fmt_info_t  fmt_load;
     logic [2:0] k;
+
     assign mode_load = mode_we_i ? mode_i : mode_r[ch_i];
-    assign k         = get_fmt_info(mode_load).k;
+    assign fmt_load  = get_fmt_info(mode_load);
+    assign k         = fmt_load.k;
 
     // =====================================================================
     // Общий 23-битный сдвигатель со знаком для IDX и STEP (в целых пикселях)
@@ -157,7 +160,7 @@ module ch_addr_gen
             reg_loaded_prev <= 1'b0;
             idx_loading_r   <= 1'b0;
         end else begin
-// ---------------------------------------------------------
+            // ---------------------------------------------------------
             // reg_idx loading (процессор пишет регистры только когда канал не в транзакции)
             // ---------------------------------------------------------
             if (idx_we_i) begin

@@ -1,9 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module ch_blender
-    import gpu_fmt_pkg::*;
-(
+module ch_blender (
     input  logic        clk,
     input  logic        rst,
 
@@ -24,6 +22,8 @@ module ch_blender
     output logic        rmw_we_o,    // 0 = read, 1 = write
     output logic [15:0] rmw_dat_o    // смешанное слово для записи в кэш
 );
+
+    `include "rtl/gpu_fmt_pkg.sv"
 
     // =====================================================================
     // READ: комбинаторная распаковка из frac_i
@@ -71,7 +71,7 @@ module ch_blender
 
             case (state)
                 IDLE: begin
-                    if (cyc_i && stb_i && we_i && !ack_r) begin   
+                    if (cyc_i && stb_i && we_i && !ack_r) begin
                         mode_r  <= mode_i;
                         frac_r  <= frac_i;
                         pixel_r <= pixel_i;

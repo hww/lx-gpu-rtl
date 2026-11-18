@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module top_fpga (
+module gpu_fpga (
     input  logic        clk_25mhz,
     input  logic        rst_btn,
 
@@ -37,13 +37,13 @@ module top_fpga (
 
     // ===== GPU status =====
     logic        gpu_halted, gpu_error;
-    logic [11:0] gpu_error_code;
+    logic [6:0] gpu_halt_code;
 
     // ===== host interface =====
     logic        gpu_start, gpu_reset;
     logic [23:0] gpu_addr;
 
-    gpu_host u_host (
+    host_if u_host (
         .clk(clk), .rst(rst),
         .wb_cyc_i(wbs_cyc_i), .wb_stb_i(wbs_stb_i), .wb_we_i(wbs_we_i),
         .wb_adr_i(wbs_adr_i), .wb_dat_i(wbs_dat_i),
@@ -51,7 +51,7 @@ module top_fpga (
         .gpu_start_o(gpu_start), .gpu_reset_o(gpu_reset), .gpu_addr_o(gpu_addr),
         .gpu_halted_i(gpu_halted),
         .gpu_error_i(gpu_error),
-        .gpu_error_code_i(gpu_error_code)
+        .gpu_error_code_i({5'd0, gpu_halt_code})
     );
 
     // ===== GPU top =====
@@ -64,7 +64,7 @@ module top_fpga (
         .clk(clk), .rst(rst),
         .halted_o(gpu_halted),
         .error_o(gpu_error),
-        .error_code_o(gpu_error_code),
+        .halt_code_o(gpu_halt_code),
         .pc_o(),                      // not used on FPGA
         .start_i(1'b0),               // no auto-start; only GPU_START
         .gpu_start_i(gpu_start),
