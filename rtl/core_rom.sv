@@ -35,11 +35,13 @@ module core_rom #(
     (* no_rw_check *)
     logic [DATA_W-1:0] mem [0:DEPTH-1] /* verilator public_flat_rw */;
 
+    // The bootloader must be in the ROM on the FPGA too (not only in
+    // simulation): $readmemh in an initial block is a ROM/RAM initialisation
+    // for Quartus, Yosys and Verilator. INIT_FILE is relative to where the
+    // tool runs (the project directory for Quartus).
     initial begin
-        for (int i = 0; i < DEPTH; i++) mem[i] = '0;
-`ifdef SIMULATION
         if (INIT_FILE != "") $readmemh(INIT_FILE, mem);
-`endif
+        else for (int i = 0; i < DEPTH; i++) mem[i] = '0;
     end
 
     always_ff @(posedge clk) begin
