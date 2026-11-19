@@ -8,6 +8,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto words = asm_assemble_file(argv[1]);
+    if (words.empty()) return 1;        // ошибка (сообщение уже напечатано)
     for (auto w : words) printf("%08X\n", w);
     return 0;
 }
