@@ -31,6 +31,10 @@ asm: tools/asm.cpp tools/asm.h tools/isa.h | $(BUILD)
 dis: tools/dis.cpp tools/disasm.h tools/isa.h | $(BUILD)
 	g++ -std=c++17 -O2 -I tools -o $(BUILD)/dis tools/dis.cpp
 
+isa-selftest: tools/isa.h | $(BUILD)
+	g++ -std=c++17 -O2 -I tools -o $(BUILD)/isa-selftest tools/isa_selftest.cpp
+	build/isa-selftest 
+	
 # ================================================================
 # top: Vgpu_top (полная симуляция ядра)
 # ================================================================

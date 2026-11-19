@@ -1,0 +1,48 @@
+[33mcommit c2a6b973cc2968005ef08746bcd106440d98e250[m[33m ([m[1;31morigin/asm-l-call[m[33m)[m
+Author: Shaeon (Carlos Palmero) <shaeon@users.noreply.github.com>
+Date:   Thu Nov 19 09:47:53 2026 +0100
+
+    asm: reject L on CALL
+    
+    As agreed with hww: CALL puts the address after the loop body in SHADOW, so
+    "L CALL f" looks like it repeats the loop after f returns, but the loop ends
+    there instead. The assembler now rejects L on CALL with the line number; L
+    stays allowed on JMP, RET and HALT (e.g. "L JMP.EQ exit" to leave a loop on a
+    condition).
+    
+    Errors are reported in the second pass only (once), and asm_assemble_file
+    returns an empty program when there was one, which the testbench, the
+    emulator and the asm CLI (now exit status 1) already treat as a failure.
+    
+    All .asm files in the repository still assemble, and the RTL and C++ tests
+    pass.
+
+[33mcommit 3c400717c6c995c4c1d0d49a5ffcf7e4cb16f9a7[m
+Author: hww <valery.hww@gmail.com>
+Date:   Tue Nov 17 18:40:45 2026 +0300
+
+    update
+
+[33mcommit 251b6db91f82755d8ba94ca01d13b9a80dda9e83[m
+Author: hww <valery.hww@gmail.com>
+Date:   Tue Nov 17 15:22:07 2026 +0300
+
+    update
+
+[33mcommit 1b8eddbf55cd9b8752749f0768feba2e04d96075[m
+Author: hww <valery.hww@gmail.com>
+Date:   Tue Nov 17 15:21:54 2026 +0300
+
+    update
+
+[33mcommit bd1dd72f7a0e08760ebd554adfdc3c9e4b33ea99[m
+Author: hww <valery.hww@gmail.com>
+Date:   Mon Nov 16 23:01:23 2026 +0300
+
+    asm disasm moved to tools
+
+[33mcommit b966cb6502cdc4d9261321356ecf79876d16e0c6[m
+Author: hww <valery.hww@gmail.com>
+Date:   Mon Nov 16 21:06:55 2026 +0300
+
+    update

@@ -1,11 +1,32 @@
-// tools/isa.h — единый источник правды для ISA LX-GPU
+// tools/isa.h — single source of truth for the LX-GPU ISA.
+//
+// Everything the assembler, the disassembler, the tests and the doc
+// generators have to agree on lives here:
+//   * opcode / condition / operand tables (X-macros)
+//   * bit-field positions of the 32-bit instruction word
+//   * operand capabilities (readable / writable / device access)
+//   * Insn: a decoded instruction, with encode() and decode()
+//   * validate(): the architectural rules that the RTL relies on.
+//     The assembler rejects what validate() rejects, and the disassembler
+//     prints `.word` for every word validate() rejects, so the two can
+//     never drift apart.
+//
+// The machine-code format is unchanged with respect to the previous isa.h.
 #pragma once
+#include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 // ============================================================
-// 1. СПИСКИ ОПЕРАЦИЙ (единственное место, где заданы коды)
+// 1. TABLES (the only place where codes are defined)
 // ============================================================
+// Arithmetic class (codes 8..15): the RTL looks only at alu_op[1:0]
+// (bit 0 = subtract, bit 1 = use carry flag) and ignores alu_op[2], so
+// 9/13 are both SUB, 11/15 both SBC, 8/12 both ADD, 10/14 both ADC.
+// The values below are the ones already present in existing images
+// (e.g. rtl/bootloader.hex uses SUB = 13) and are kept as canonical.
+// Shift class (16..23): alu_op[2:1] = ROR/SHR/SAR. Class 11 is MUL.
 #define ISA_ALU_OPS(X) \
     X(MOV,   0)  X(MVN,   1)  X(AND,   2)  X(BIC,   3) \
     X(OR,    4)  X(ORN,   5)  X(XOR,   6)  X(XNOR,  7) \
@@ -39,7 +60,7 @@
 namespace isa {
 
 // ============================================================
-// 2. ГЕНЕРАЦИЯ ENUM (работает везде)
+// 2. ENUMS
 // ============================================================
 enum AluOp : uint8_t {
 #define X(name, val) ALU_##name = val,
@@ -53,9 +74,21 @@ enum CtrlOp : uint8_t {
 #undef X
 };
 
+// Operand codes (6 bits): OPR_R0.., OPR_ZERO, OPR_FLAGS, OPR_DATA0, ...
+enum Opr : uint8_t {
+#define X(name, val) OPR_##name = val,
+    ISA_REGS(X)
+#undef X
+};
+
 // ============================================================
-// 3. ФУНКЦИИ ДЛЯ ПОЛУЧЕНИЯ ИМЁН (вместо массивов с пропусками)
+// 3. NAME <-> CODE (callers pass upper-case names to *_code)
 // ============================================================
+inline std::string to_upper(std::string s) {
+    for (auto& ch : s) ch = (char)std::toupper((unsigned char)ch);
+    return s;
+}
+
 inline const char* alu_name(int code) {
     switch (code) {
 #define X(name, val) case val: return #name;
@@ -92,13 +125,18 @@ inline const char* reg_name(int code) {
     }
 }
 
-// ============================================================
-// 4. УТИЛИТЫ ДЛЯ ПАРСИНГА (ищут код по имени)
-// ============================================================
 inline int alu_code(const std::string& s) {
     if (s.empty()) return -1;
 #define X(name, val) if (s == #name) return val;
     ISA_ALU_OPS(X)
+#undef X
+    return -1;
+}
+
+inline int ctrl_code(const std::string& s) {
+    if (s.empty()) return -1;
+#define X(name, val) if (s == #name) return val;
+    ISA_CTRL_OPS(X)
 #undef X
     return -1;
 }
@@ -119,8 +157,11 @@ inline int reg_code(const std::string& s) {
     return -1;
 }
 
+inline bool alu_valid(int code)  { return alu_name(code)[0]  != '?'; }
+inline bool ctrl_valid(int code) { return ctrl_name(code)[0] != '?'; }
+
 // ============================================================
-// 5. ПОЛЯ И УТИЛИТЫ БИТОВЫХ ОПЕРАЦИЙ
+// 4. FIELDS
 // ============================================================
 constexpr int L_LO      = 31, L_HI      = 31;
 constexpr int J_LO      = 30, J_HI      = 30;
@@ -138,7 +179,7 @@ constexpr int R_LO      = 16, R_HI      = 16;
 constexpr int CTRLOP_LO = 12, CTRLOP_HI = 15;
 constexpr int ADDR_LO   = 0,  ADDR_HI   = 11;
 
-constexpr uint32_t CLASS_RR   = 0b00;
+constexpr uint32_t CLASS_RR   = 0b00;   // {J, I}
 constexpr uint32_t CLASS_LDI  = 0b01;
 constexpr uint32_t CLASS_CTRL = 0b10;
 constexpr uint32_t CLASS_IMM  = 0b11;
@@ -154,13 +195,272 @@ inline uint32_t dec_field(uint32_t w, int lo, int hi) {
     return (w >> lo) & mask;
 }
 
+// ============================================================
+// 5. ARCHITECTURAL LIMITS
+// ============================================================
+constexpr int      ROM_WORDS     = 4096;   // microcode ROM depth, PC is 12 bits
+constexpr int      NUM_CHANNELS  = 4;
+constexpr uint32_t HALT_CODE_MAX = 127;    // status register keeps 7 bits
+constexpr uint32_t IRQ_CODE_MAX  = 255;    // IRQ_CODE port is 8 bits
+constexpr int      IMM11_MIN     = -1024;  // SX=1: sign-extended
+constexpr int      IMM11_MAX     = 2047;   // SX=0: zero-extended
+constexpr int      IMM16_MIN     = -32768;
+constexpr int      IMM16_MAX     = 65535;
+// RTL: only JMP by register is resolved in the X stage; CALL by register
+// does not exist. Flip this together with the RTL if it is ever added.
+constexpr bool     CALL_BY_REG   = false;
+
+// ============================================================
+// 6. OPERAND CAPABILITIES
+// ============================================================
+// RDEV: a read is a bus transaction that stalls the pipeline until acked
+//       (DATAn, ROML, ROMH).
+// WDEV: a write is such a transaction (DATAn).
+enum : uint8_t { CAP_R = 1, CAP_W = 2, CAP_RDEV = 4, CAP_WDEV = 8 };
+
+inline uint8_t operand_caps(int c) {
+    if (c < 0 || c > 63) return 0;
+    if (c < 32)          return CAP_R | CAP_W;
+    switch (c) {
+        case OPR_ZERO:                          // write is ignored
+        case OPR_FLAGS: case OPR_SHADOW:
+        case OPR_LOOP_CNT: case OPR_LOOP_TGT:
+            return CAP_R | CAP_W;
+        case OPR_BUSY: case OPR_MHI:
+            return CAP_R;
+        case OPR_ROML: case OPR_ROMH:
+            return CAP_R | CAP_W | CAP_RDEV;
+        case OPR_ROMA:
+            return CAP_W;
+        case OPR_RSV42: case OPR_RSV43:
+            return 0;
+        default: break;
+    }
+    if (c >= OPR_DATA0 && c < OPR_DATA0 + NUM_CHANNELS)
+        return CAP_R | CAP_W | CAP_RDEV | CAP_WDEV;
+    return CAP_W;                               // IDX / IDXH / STEP / PAGE
+}
+
+// Largest constant a MOV/LDI may store into a special operand without the
+// RTL silently truncating it.
+inline uint32_t operand_imm_max(int c) {
+    if (c == OPR_FLAGS)                              return 0xF;
+    if (c == OPR_LOOP_TGT || c == OPR_ROMA)          return ROM_WORDS - 1;
+    if (c >= OPR_IDXH0 && c < OPR_IDXH0 + NUM_CHANNELS) return 7;      // 3 bits
+    if (c >= OPR_PAGE0 && c < OPR_PAGE0 + NUM_CHANNELS) return 0x7FF;  // {mode[2:0], page[7:0]}
+    return 0xFFFF;
+}
+
+// Assembler convention (kept from the previous version): every ALU op except
+// MOV/MVN updates the flags unless told otherwise (!nf).
+inline bool alu_default_f(int op) { return op != ALU_MOV && op != ALU_MVN; }
+
+// ============================================================
+// 7. DECODED INSTRUCTION
+// ============================================================
+struct Insn {
+    uint32_t cls   = CLASS_RR;
+    uint32_t l     = 0;
+    uint32_t cond  = 0;
+    uint32_t write = 0;
+    uint32_t f     = 0;
+    uint32_t dst   = 0;
+    uint32_t op    = 0;     // ALU_OP (RR / IMM) or CTRL_OP (CTRL)
+    uint32_t src   = 0;     // RR: SRC;  CTRL with R=1: register operand
+    uint32_t sx    = 0;
+    uint32_t imm11 = 0;
+    uint32_t imm16 = 0;
+    uint32_t r     = 0;     // CTRL: JMP by register
+    uint32_t addr  = 0;     // CTRL with R=0: ADDR / HALT code / IRQ code / channel
+};
+
+inline uint32_t encode(const Insn& i) {
+    uint32_t w = enc_field(i.l, L_LO, L_HI)
+               | enc_field(i.cls >> 1, J_LO, J_HI)
+               | enc_field(i.cls & 1u, I_LO, I_HI)
+               | enc_field(i.cond, COND_LO, COND_HI)
+               | enc_field(i.write, WRITE_LO, WRITE_HI)
+               | enc_field(i.f, F_LO, F_HI)
+               | enc_field(i.dst, DST_LO, DST_HI);
+    switch (i.cls) {
+        case CLASS_RR:
+            w |= enc_field(i.op, OP_LO, OP_HI) | enc_field(i.src, SRC_LO, SRC_HI);
+            break;
+        case CLASS_IMM:
+            w |= enc_field(i.op, OP_LO, OP_HI) | enc_field(i.sx, SX_LO, SX_HI)
+               | enc_field(i.imm11, IMM11_LO, IMM11_HI);
+            break;
+        case CLASS_LDI:
+            w |= enc_field(i.imm16, IMM16_LO, IMM16_HI);
+            break;
+        default:  // CLASS_CTRL
+            w |= enc_field(i.r, R_LO, R_HI) | enc_field(i.op, CTRLOP_LO, CTRLOP_HI);
+            w |= i.r ? enc_field(i.src, SRC_LO, SRC_HI)
+                     : enc_field(i.addr, ADDR_LO, ADDR_HI);
+            break;
+    }
+    return w;
+}
+
+// Raw field extraction; bits the format does not carry (RSV) are dropped.
+inline Insn decode(uint32_t w) {
+    Insn c;
+    c.l     = dec_field(w, L_LO, L_HI);
+    c.cls   = (dec_field(w, J_LO, J_HI) << 1) | dec_field(w, I_LO, I_HI);
+    c.cond  = dec_field(w, COND_LO, COND_HI);
+    c.write = dec_field(w, WRITE_LO, WRITE_HI);
+    c.f     = dec_field(w, F_LO, F_HI);
+    c.dst   = dec_field(w, DST_LO, DST_HI);
+    switch (c.cls) {
+        case CLASS_RR:
+            c.op  = dec_field(w, OP_LO, OP_HI);
+            c.src = dec_field(w, SRC_LO, SRC_HI);
+            break;
+        case CLASS_IMM:
+            c.op    = dec_field(w, OP_LO, OP_HI);
+            c.sx    = dec_field(w, SX_LO, SX_HI);
+            c.imm11 = dec_field(w, IMM11_LO, IMM11_HI);
+            break;
+        case CLASS_LDI:
+            c.imm16 = dec_field(w, IMM16_LO, IMM16_HI);
+            break;
+        default:
+            c.r    = dec_field(w, R_LO, R_HI);
+            c.op   = dec_field(w, CTRLOP_LO, CTRLOP_HI);
+            c.src  = dec_field(w, SRC_LO, SRC_HI);
+            c.addr = dec_field(w, ADDR_LO, ADDR_HI);
+            break;
+    }
+    return c;
+}
+
+// Value an IMM11 operand has after the RTL's extension (sign-extends only if
+// SX = 1 and bit 10 is set).
+inline int imm11_value(uint32_t sx, uint32_t imm11) {
+    return (sx && (imm11 & 0x400u)) ? (int)imm11 - 2048 : (int)imm11;
+}
+
+// ============================================================
+// 8. ARCHITECTURAL RULES
+// ============================================================
+// Returns true if the instruction is something the assembler accepts and the
+// RTL executes as written. Otherwise fills *why (if given).
+// Rules (see top.sv):
+//   * special operands can be written only by MOV / LDI (operand A of every
+//     other op is read from the register file, so a special destination
+//     would read garbage);
+//   * read-only operands (BUSY, MHI) are not writable, write-only operands
+//     (ROMA, IDX*, IDXH*, STEP*, PAGE*) are not readable, 42/43 are reserved;
+//   * one device transaction per instruction;
+//   * constants stored into special operands must fit the register;
+//   * JMP by register takes a readable, non-device operand; no CALL by reg;
+//   * control-word argument ranges (HALT, IRQ, FLUSH);
+//   * no L bit on CALL (the loop would end after RET, not repeat).
+inline bool validate(const Insn& c, std::string* why = nullptr) {
+    auto fail = [&](const std::string& m) { if (why) *why = m; return false; };
+    auto nm   = [](uint32_t code) { return std::string(reg_name((int)code)); };
+    auto hex  = [](uint32_t v) {
+        char b[16]; snprintf(b, sizeof b, "0x%X", v); return std::string(b);
+    };
+
+    if (c.cond > 14) return fail("reserved condition code " + std::to_string(c.cond));
+
+    switch (c.cls) {
+    case CLASS_RR:
+    case CLASS_IMM: {
+        if (!alu_valid((int)c.op))
+            return fail("reserved ALU opcode " + std::to_string(c.op));
+        uint8_t dcap = operand_caps((int)c.dst);
+        if (!(dcap & CAP_W))
+            return fail("operand " + nm(c.dst) + " is not writable");
+        if (c.dst >= 32 && c.op != ALU_MOV)
+            return fail("special operand " + nm(c.dst) +
+                        " can be written only by MOV or LDI");
+        if (c.cls == CLASS_RR) {
+            uint8_t scap = operand_caps((int)c.src);
+            if (!(scap & CAP_R))
+                return fail("operand " + nm(c.src) + " is not readable");
+            if ((scap & CAP_RDEV) && (dcap & CAP_WDEV))
+                return fail("source " + nm(c.src) + " and destination " + nm(c.dst) +
+                            " are both bus accesses; use a register in between");
+            if ((c.src == OPR_ROML || c.src == OPR_ROMH) && c.dst == OPR_ROMH)
+                return fail("ROM read and ROMH write in one instruction");
+        } else {
+            if (c.sx && !(c.imm11 & 0x400u))
+                return fail("SX set but IMM11 bit 10 clear (not a form the assembler produces)");
+            if (c.dst >= 32) {
+                uint32_t v = (uint32_t)imm11_value(c.sx, c.imm11) & 0xFFFFu;
+                if (v > operand_imm_max((int)c.dst))
+                    return fail("constant " + hex(v) + " does not fit " + nm(c.dst) +
+                                " (max " + hex(operand_imm_max((int)c.dst)) + ")");
+            }
+        }
+        return true;
+    }
+    case CLASS_LDI: {
+        uint8_t dcap = operand_caps((int)c.dst);
+        if (!(dcap & CAP_W))
+            return fail("operand " + nm(c.dst) + " is not writable");
+        if (c.dst >= 32 && c.imm16 > operand_imm_max((int)c.dst))
+            return fail("constant " + hex(c.imm16) + " does not fit " + nm(c.dst) +
+                        " (max " + hex(operand_imm_max((int)c.dst)) + ")");
+        return true;
+    }
+    default: {   // CLASS_CTRL
+        if (!ctrl_valid((int)c.op))
+            return fail("reserved control opcode " + std::to_string(c.op));
+        // CALL stores the address after the loop body in SHADOW, so after RET
+        // the loop ends instead of repeating. L stays legal on JMP, RET, HALT.
+        if (c.l && c.op == CTRL_CALL)
+            return fail("L is not allowed on CALL (after RET the loop ends, it does "
+                        "not repeat); put L on a data word after the CALL");
+        if (c.r) {
+            if (c.op == CTRL_CALL && !CALL_BY_REG)
+                return fail("CALL by register is not supported (only JMP Rn)");
+            if (c.op != CTRL_JMP && c.op != CTRL_CALL)
+                return fail(std::string(ctrl_name((int)c.op)) + " cannot use a register operand");
+            uint8_t scap = operand_caps((int)c.src);
+            if (!(scap & CAP_R))
+                return fail("jump operand " + nm(c.src) + " is not readable");
+            if (scap & CAP_RDEV)
+                return fail("jump operand " + nm(c.src) +
+                            " is a bus access; copy it to a register first");
+            return true;
+        }
+        switch (c.op) {
+            case CTRL_NOP: case CTRL_RET:
+                if (c.addr != 0) return fail(std::string(ctrl_name((int)c.op)) + " takes no argument");
+                break;
+            case CTRL_HALT:
+                if (c.addr > HALT_CODE_MAX)
+                    return fail("HALT code " + std::to_string(c.addr) + " exceeds " +
+                                std::to_string(HALT_CODE_MAX));
+                break;
+            case CTRL_IRQ:
+                if (c.addr > IRQ_CODE_MAX)
+                    return fail("IRQ code " + std::to_string(c.addr) + " exceeds " +
+                                std::to_string(IRQ_CODE_MAX));
+                break;
+            case CTRL_FLUSH:
+                if (c.addr >= (uint32_t)NUM_CHANNELS)
+                    return fail("FLUSH channel " + std::to_string(c.addr) + " is not 0.." +
+                                std::to_string(NUM_CHANNELS - 1));
+                break;
+            default: break;   // JMP / CALL: 12-bit target, always in range
+        }
+        return true;
+    }
+    }
+}
+
 } // namespace isa
 
 // ============================================================
-// 6. COMPILE-TIME ПРОВЕРКИ
+// 9. COMPILE-TIME CHECKS
 // ============================================================
 static_assert(isa::L_LO == 31 && isa::J_LO == 30 && isa::I_LO == 29, "ISA drift: L/J/I");
 static_assert(isa::COND_LO == 25 && isa::COND_HI == 28, "ISA drift: COND");
+static_assert(isa::WRITE_LO == 24 && isa::F_LO == 23, "ISA drift: WRITE/F");
 static_assert(isa::DST_LO == 17 && isa::DST_HI == 22, "ISA drift: DST");
 static_assert(isa::OP_LO == 12 && isa::OP_HI == 16, "ISA drift: ALU_OP");
 static_assert(isa::SRC_LO == 6 && isa::SRC_HI == 11, "ISA drift: SRC");
@@ -168,6 +468,6 @@ static_assert(isa::IMM11_LO == 0 && isa::IMM11_HI == 10, "ISA drift: IMM11");
 static_assert(isa::IMM16_LO == 0 && isa::IMM16_HI == 15, "ISA drift: IMM16");
 static_assert(isa::CTRLOP_LO == 12 && isa::CTRLOP_HI == 15, "ISA drift: CTRL_OP");
 static_assert(isa::ADDR_LO == 0 && isa::ADDR_HI == 11, "ISA drift: ADDR");
-static_assert(isa::ALU_SUB == 13, "isa.h: ALU_SUB must be 13 per RTL");
-static_assert(isa::ALU_ADC == 10, "isa.h: ALU_ADC must be 10 per RTL");
-static_assert(isa::ALU_SBC == 15, "isa.h: ALU_SBC must be 15 per RTL");
+static_assert(isa::ALU_SUB == 13, "isa.h: SUB = 13 is used by existing images (9 is the RTL alias)");
+static_assert(isa::ALU_ADC == 10, "isa.h: ADC must be 10");
+static_assert(isa::ALU_SBC == 15, "isa.h: SBC = 15 is used by existing images (11 is the RTL alias)");

@@ -1,98 +1,85 @@
-// tools/disasm.h — дизассемблер LX-GPU (использует isa.h)
+// tools/disasm.h — LX-GPU disassembler (depends only on tools/isa.h).
+//
+// Round-trip guarantee: for EVERY 32-bit word w,
+//     asm(disasm32(w)) == w
+// A word is printed as text only if
+//   * it passes isa::validate()  (the assembler would accept the text), and
+//   * re-encoding the printed fields gives w again (no reserved/unused bits
+//     are set, no alias opcode, no non-canonical LDI/CTRL padding).
+// Every other word is printed as ".word 0x........".
+//
+// Output syntax is the one documented in asm.h:
+//   [L ]MNEMONIC[.COND] operands [!w] [!f|!nf]
+// Modifiers appear only where they differ from the assembler defaults;
+// SUB/AND with !w and F=1 are printed as CMP / TST.
 #pragma once
 #include "isa.h"
+#include <cstdio>
+#include <string>
 
-static const char* disasm32(uint32_t w) {
+static inline const char* disasm32(uint32_t w) {
     using namespace isa;
     static char buf[160];
-    buf[0] = 0;
 
-    uint32_t L     = dec_field(w, L_LO, L_HI);
-    uint32_t J     = dec_field(w, J_LO, J_HI);
-    uint32_t I     = dec_field(w, I_LO, I_HI);
-    uint32_t COND  = dec_field(w, COND_LO, COND_HI);
-    uint32_t WRITE = dec_field(w, WRITE_LO, WRITE_HI);
-    uint32_t F     = dec_field(w, F_LO, F_HI);
-    uint32_t DST   = dec_field(w, DST_LO, DST_HI);
-    uint32_t OP    = dec_field(w, OP_LO, OP_HI);
-    uint32_t SRC   = dec_field(w, SRC_LO, SRC_HI);
-    uint32_t R     = dec_field(w, R_LO, R_HI);
-    uint32_t SX    = dec_field(w, SX_LO, SX_HI);
-    uint32_t IMM11 = dec_field(w, IMM11_LO, IMM11_HI);
-    uint32_t ADDR  = dec_field(w, ADDR_LO, ADDR_HI);
-    uint32_t IMM16 = dec_field(w, IMM16_LO, IMM16_HI);
+    Insn c = decode(w);
 
-    const char* lpre = (L ? "L " : "");
-    const char* cnd  = cond_name(COND); // было COND_NAMES[COND]
-    char csuf[8] = "";
-    if (COND) snprintf(csuf, sizeof csuf, ".%s", cnd);
+    // Reduce to what the text can express; encode() below detects any
+    // difference from the original word.
+    if (c.cls == CLASS_LDI) { c.write = 1; c.f = 0; }
+    if (c.cls == CLASS_CTRL) {
+        c.write = 0; c.f = 0; c.dst = 0;
+        if (c.r) c.addr = 0; else c.src = 0;
+    }
 
-    // Безопасное получение имён
-    auto reg = [](uint32_t idx) -> const char* {
-        return reg_name(idx); // было REG_NAMES[idx]
-    };
-
-    // LDI16: J=0, I=1
-    if (J == 0 && I == 1) {
-        snprintf(buf, sizeof buf, "%sLDI%s %s, #0x%04X",
-                lpre, csuf, reg(DST), IMM16);
+    std::string why;
+    if (!validate(c, &why) || encode(c) != w) {
+        snprintf(buf, sizeof buf, ".word 0x%08X", w);
         return buf;
     }
 
-    // CTRL: J=1, I=0
-    if (J == 1 && I == 0) {
-        uint32_t opc = dec_field(w, CTRLOP_LO, CTRLOP_HI);
-        const char* opn = ctrl_name(opc); // было CTRL_NAMES[opc]
+    std::string s;
+    if (c.l) s += "L ";
+    const std::string cnd = c.cond ? std::string(".") + cond_name((int)c.cond) : std::string();
 
-        if (opc == CTRL_JMP || opc == CTRL_CALL) {
-            if (R) {
-                snprintf(buf, sizeof buf, "%s%s%s %s",
-                         lpre, opn, csuf, reg(SRC));
-            } else {
-                snprintf(buf, sizeof buf, "%s%s%s 0x%03X",
-                         lpre, opn, csuf, ADDR);
-            }
-            return buf;
+    switch (c.cls) {
+    case CLASS_LDI: {
+        char t[48];
+        snprintf(t, sizeof t, "LDI%s %s, #0x%04X", cnd.c_str(), reg_name((int)c.dst), c.imm16);
+        s += t;
+        break;
+    }
+    case CLASS_CTRL: {
+        const char* opn = ctrl_name((int)c.op);
+        char t[64];
+        if (c.op == CTRL_JMP || c.op == CTRL_CALL) {
+            if (c.r) snprintf(t, sizeof t, "%s%s %s", opn, cnd.c_str(), reg_name((int)c.src));
+            else     snprintf(t, sizeof t, "%s%s 0x%03X", opn, cnd.c_str(), c.addr);
+        } else if (c.op == CTRL_HALT || c.op == CTRL_IRQ || c.op == CTRL_FLUSH) {
+            snprintf(t, sizeof t, "%s%s %u", opn, cnd.c_str(), c.addr);
+        } else {
+            snprintf(t, sizeof t, "%s%s", opn, cnd.c_str());
         }
-        if (opc == CTRL_HALT || opc == CTRL_IRQ) {
-            snprintf(buf, sizeof buf, "%s%s%s 0x%03X",
-                     lpre, opn, csuf, ADDR);
-            return buf;
+        s += t;
+        break;
+    }
+    default: {   // CLASS_RR / CLASS_IMM
+        const char* mn = alu_name((int)c.op);
+        bool pseudo = false;
+        if (!c.write && c.f && c.op == ALU_SUB) { mn = "CMP"; pseudo = true; }
+        else if (!c.write && c.f && c.op == ALU_AND) { mn = "TST"; pseudo = true; }
+
+        s += mn + cnd + " " + reg_name((int)c.dst) + ", ";
+        if (c.cls == CLASS_RR) s += reg_name((int)c.src);
+        else                   s += "#" + std::to_string(imm11_value(c.sx, c.imm11));
+
+        if (!pseudo) {
+            if (!c.write) s += " !w";
+            if ((c.f != 0) != alu_default_f((int)c.op)) s += c.f ? " !f" : " !nf";
         }
-        if (opc == CTRL_FLUSH) {
-            // Показываем маску каналов в hex, например FLUSH 0x02 (канал 1)
-            snprintf(buf, sizeof buf, "%s%sFLUSH 0x%X",
-                     lpre, csuf, ADDR & 0xF);
-            return buf;
-        }
-        snprintf(buf, sizeof buf, "%s%s%s", lpre, opn, csuf);
-        return buf;
+        break;
+    }
     }
 
-    // REG-REG: J=0, I=0
-    if (J == 0 && I == 0) {
-        const char* opn = alu_name(OP); // было ALU_NAMES[OP]
-        snprintf(buf, sizeof buf, "%s%s%s %s, %s%s%s",
-                 lpre, opn, csuf,
-                 reg(DST), reg(SRC),
-                 WRITE ? "" : " !w",
-                 F ? " !f" : "");
-        return buf;
-    }
-
-    // REG-IMM11: J=1, I=1
-    if (J == 1 && I == 1) {
-        const char* opn = alu_name(OP); // было ALU_NAMES[OP]
-        int32_t imm = (int32_t)IMM11;
-        if (SX) imm |= ~0x7FF;
-        snprintf(buf, sizeof buf, "%s%s%s %s, #%d%s%s",
-                 lpre, opn, csuf,
-                 reg(DST), imm,
-                 WRITE ? "" : " !w",
-                 F ? " !f" : "");
-        return buf;
-    }
-
-    snprintf(buf, sizeof buf, "?? %08X", w);
+    snprintf(buf, sizeof buf, "%s", s.c_str());
     return buf;
 }
