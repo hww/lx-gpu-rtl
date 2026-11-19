@@ -30,6 +30,19 @@ static inline long asm_parse_int(const std::string& s) {
     return neg ? -v : v;
 }
 
+// ---------- ошибки ----------
+// Сообщения печатаются только во втором проходе (asm_pass == 2);
+// при ошибках asm_assemble_file возвращает пустой вектор.
+inline int asm_pass   = 0;
+inline int asm_lineno = 0;
+inline int asm_errors = 0;
+
+static inline void asm_error(const char* msg) {
+    if (asm_pass != 2) return;
+    fprintf(stderr, "asm: line %d: %s\n", asm_lineno, msg);
+    asm_errors++;
+}
+
 // ---------- разбор одной строки ----------
 // ok = 1, если строка — инструкция; ok = 0, если пустая/метка/ошибка
 static inline uint32_t asm_line(const std::string& raw,
@@ -107,6 +120,12 @@ static inline uint32_t asm_line(const std::string& raw,
 
     if (mn == "JMP" || mn == "CALL") {
         if (args.size() != 1) return 0;
+        // L на CALL запрещён: CALL кладёт в SHADOW адрес после тела цикла,
+        // и после RET цикл не повторяется, а заканчивается. L допустим на
+        // JMP/RET/HALT (например, L JMP.EQ exit — выход из цикла по условию).
+        if (L && mn == "CALL")
+            asm_error("L is not allowed on CALL (after RET the loop ends, it does "
+                      "not repeat); put L on a data word after the CALL");
         uint32_t op = (mn == "JMP") ? isa::CTRL_JMP : isa::CTRL_CALL;
         int rr = reg_code(args[0]);
         if (rr >= 0) {
@@ -239,8 +258,10 @@ static inline uint32_t asm_line(const std::string& raw,
 static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>& lines) {
     std::map<std::string,int> labels;
     std::vector<uint32_t> words;
+    asm_errors = 0;
 
     // ---- проход 1: метки + .org ----
+    asm_pass = 1;
     int pc = 0;
     for (auto& raw : lines) {
         std::string line = asm_trim(asm_strip_comment(raw));
@@ -276,7 +297,10 @@ static inline std::vector<uint32_t> asm_assemble(const std::vector<std::string>&
     }
 
     // ---- проход 2: код + .org ----
+    asm_pass = 2;
+    asm_lineno = 0;
     for (auto& raw : lines) {
+        asm_lineno++;
         std::string line = asm_trim(asm_strip_comment(raw));
         if (line.empty()) continue;
 
@@ -332,6 +356,11 @@ static inline std::vector<uint32_t> asm_assemble_file(const char* path, uint16_t
     }
 
     auto words = asm_assemble(lines);
+    asm_pass = 0;
+    if (asm_errors) {
+        fprintf(stderr, "asm: %d error(s) in %s\n", asm_errors, path);
+        return {};
+    }
 
     if (initial_org > 0 && (size_t)initial_org <= words.size()) {
         if (out_org) *out_org = (uint16_t)initial_org;
