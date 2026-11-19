@@ -10,9 +10,7 @@ enum PixFmt : uint8_t {
     FMT_4BPP     = 2, // k=2
     FMT_2BPP     = 3, // k=3 (read-only)
     FMT_1BPP     = 4, // k=4 (read-only)
-    FMT_PASS_LO8 = 5, // k=0, младший байт (sh=0)
-    FMT_PASS_HI8 = 6, // k=0, старший байт (sh=8)
-    FMT_RSV      = 7  // резерв (read-only)
+    FMT_RSV      = 7  // 5..7: резерв (чтение как 16 bpp, запись запрещена)
 };
 
 struct FmtInfo {
@@ -29,10 +27,14 @@ inline FmtInfo get_fmt_info(uint8_t fmt) {
         case 2:  return {2, 0x000F, 0xC, true};  // 4 bpp
         case 3:  return {3, 0x0003, 0xE, false}; // 2 bpp
         case 4:  return {4, 0x0001, 0xF, false}; // 1 bpp
-        case 5:  return {0, 0x00FF, 0x0, true};  // LO8
-        case 6:  return {0, 0x00FF, 0x8, true};  // HI8
         default: return {0, 0xFFFF, 0x0, false}; // резерв
     }
+}
+
+// Сдвиг пикселя в слове (как rtl/gpu_fmt_pkg.sv, pos_shift): байты в порядке
+// little-endian, внутри байта — со старших битов, как видео Aleste.
+inline uint8_t pos_shift(const FmtInfo& f, uint8_t frac) {
+    return static_cast<uint8_t>(((~frac) & f.s_mask) ^ (f.k ? 0x8 : 0x0));
 }
 
 } // namespace lx

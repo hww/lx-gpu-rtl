@@ -152,34 +152,36 @@ int main(int argc, char** argv) {
 
     // Коды форматов по gpu_fmt_pkg:
     // 0: 16bpp (k=0) | 1: 8bpp (k=1) | 2: 4bpp (k=2)
-    // 3: 2bpp  (k=3) | 4: 1bpp (k=4) | 5: LO8 (k=0) | 6: HI8 (k=0)
+    // 3: 2bpp  (k=3) | 4: 1bpp (k=4) | 5..7: резерв (как 16bpp, без записи)
+    // Порядок: байты little-endian, внутри байта со старших битов
+    // (8bpp p0 = [7:0]; 4bpp p0..p3 = [7:4], [3:0], [15:12], [11:8])
 
     // ===== reads =====
     header("Read (unpack from frac_i, ack_o = ack_i)");
     do_read(0, 0x0, 0x1234, 0x1234, "16bpp.rd");
-    do_read(1, 0x0, 0xABCD, 0x00AB, "8bpp.p0.rd");
-    do_read(1, 0x8, 0xABCD, 0x00CD, "8bpp.p1.rd");
-    do_read(2, 0x0, 0xABCD, 0x000A, "4bpp.p0.rd");
-    do_read(2, 0x4, 0xABCD, 0x000B, "4bpp.p1.rd");
-    do_read(2, 0x8, 0xABCD, 0x000C, "4bpp.p2.rd");
-    do_read(2, 0xC, 0xABCD, 0x000D, "4bpp.p3.rd");
-    do_read(3, 0x0, 0xE400, 0x0003, "2bpp.p0.rd");
-    do_read(3, 0x2, 0xE400, 0x0002, "2bpp.p1.rd");
-    do_read(4, 0x0, 0x8000, 0x0001, "1bpp.p0.rd");
-    do_read(4, 0x1, 0x8000, 0x0000, "1bpp.p1.rd");
-    do_read(5, 0x0, 0xABCD, 0x00CD, "lo8.rd");
-    do_read(6, 0x0, 0xABCD, 0x00AB, "hi8.rd");
+    do_read(1, 0x0, 0xABCD, 0x00CD, "8bpp.p0.rd");
+    do_read(1, 0x8, 0xABCD, 0x00AB, "8bpp.p1.rd");
+    do_read(2, 0x0, 0xABCD, 0x000C, "4bpp.p0.rd");
+    do_read(2, 0x4, 0xABCD, 0x000D, "4bpp.p1.rd");
+    do_read(2, 0x8, 0xABCD, 0x000A, "4bpp.p2.rd");
+    do_read(2, 0xC, 0xABCD, 0x000B, "4bpp.p3.rd");
+    do_read(3, 0x0, 0x00E4, 0x0003, "2bpp.p0.rd");
+    do_read(3, 0x2, 0x00E4, 0x0002, "2bpp.p1.rd");
+    do_read(3, 0x8, 0xE400, 0x0003, "2bpp.p4.rd");
+    do_read(4, 0x0, 0x0080, 0x0001, "1bpp.p0.rd");
+    do_read(4, 0x1, 0x0080, 0x0000, "1bpp.p1.rd");
+    do_read(4, 0x8, 0x8000, 0x0001, "1bpp.p8.rd");
+    do_read(5, 0x0, 0xABCD, 0xABCD, "rsv5.rd");
 
     // ===== writes (RMW) =====
     header("Write (RMW & Write-Protect for 1bpp/2bpp)");
     do_write(0, 0x0, 0xABCD, 0x1234, 0x1234, "16bpp.wr");
-    do_write(1, 0x0, 0xABCD, 0x0012, 0x12CD, "8bpp.p0.wr");
-    do_write(1, 0x8, 0xABCD, 0x0012, 0xAB12, "8bpp.p1.wr");
-    do_write(2, 0x0, 0xABCD, 0x0005, 0x5BCD, "4bpp.p0.wr");
-    do_write(2, 0x8, 0xABCD, 0x0005, 0xAB5D, "4bpp.p2.wr");
-    do_write(2, 0xC, 0xABCD, 0x0005, 0xABC5, "4bpp.p3.wr");
-    do_write(5, 0x0, 0xABCD, 0x0012, 0xAB12, "lo8.wr");
-    do_write(6, 0x0, 0xABCD, 0x0012, 0x12CD, "hi8.wr");
+    do_write(1, 0x0, 0xABCD, 0x0012, 0xAB12, "8bpp.p0.wr");
+    do_write(1, 0x8, 0xABCD, 0x0012, 0x12CD, "8bpp.p1.wr");
+    do_write(2, 0x0, 0xABCD, 0x0005, 0xAB5D, "4bpp.p0.wr");
+    do_write(2, 0x8, 0xABCD, 0x0005, 0x5BCD, "4bpp.p2.wr");
+    do_write(2, 0xC, 0xABCD, 0x0005, 0xA5CD, "4bpp.p3.wr");
+    do_write(5, 0x0, 0xABCD, 0x0012, 0xABCD, "rsv5.wr_prot");
 
     // Проверка запрета записи (wr_en = 0) для 2bpp (mode=3) и 1bpp (mode=4)
     do_write(3, 0x0, 0xE400, 0x0000, 0xE400, "2bpp.wr_prot");
