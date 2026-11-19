@@ -95,3 +95,9 @@ make sim-sprite
 ```bash
 g++ -std=c++17 -O2 tools/asm.cpp -o asm
 g++ -std=c++17 -O2 tools/dis.cpp -o disasm
+```
+
+### 4. GPU Assembler
+
+[LX-GPU Assembler and Disassembler [EN]](tools/README.md)
+[LX-GPU Assembler and Disassembler [RU]](tools/README.RU.md)
