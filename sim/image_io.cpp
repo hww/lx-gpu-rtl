@@ -230,8 +230,9 @@ std::vector<uint16_t> pack_pixels(const std::vector<uint8_t>& indices,
         for (size_t i = 0; i < n_pixels; i++) {
             size_t wi = i / 2;
             int pos = (int)(i & 1);
-            if (pos == 0) words[wi] |= (uint16_t)((uint16_t)indices[i] << 8);
-            else          words[wi] |= (uint16_t)indices[i];
+            // пиксель 0 = младший байт (как видео Aleste и ch_blender)
+            if (pos == 0) words[wi] |= (uint16_t)indices[i];
+            else          words[wi] |= (uint16_t)((uint16_t)indices[i] << 8);
         }
         return words;
     }
@@ -242,7 +243,7 @@ std::vector<uint16_t> pack_pixels(const std::vector<uint8_t>& indices,
         for (size_t i = 0; i < n_pixels; i++) {
             size_t wi = i / 4;
             int pos = (int)(i & 3);
-            int shift = (3 - pos) * 4;
+            int shift = ((3 - pos) * 4) ^ 8;   // 7..4, 3..0, 15..12, 11..8
             words[wi] |= (uint16_t)(((uint16_t)(indices[i] & 0xF)) << shift);
         }
         return words;
@@ -254,7 +255,7 @@ std::vector<uint16_t> pack_pixels(const std::vector<uint8_t>& indices,
         for (size_t i = 0; i < n_pixels; i++) {
             size_t wi = i / 16;
             int pos = (int)(i & 15);
-            int shift = 15 - pos;
+            int shift = (15 - pos) ^ 8;        // бит 7 .. 0, затем 15 .. 8
             words[wi] |= (uint16_t)(((uint16_t)(indices[i] & 1)) << shift);
         }
         return words;
@@ -283,8 +284,8 @@ std::vector<uint8_t> unpack_pixels(const std::vector<uint16_t>& words,
         for (size_t i = 0; i < n_pixels; i++) {
             size_t wi = i / 2;
             int pos = (int)(i & 1);
-            out[i] = (pos == 0) ? (uint8_t)((words[wi] >> 8) & 0xFF)
-                                : (uint8_t)( words[wi]       & 0xFF);
+            out[i] = (pos == 0) ? (uint8_t)( words[wi]       & 0xFF)
+                                : (uint8_t)((words[wi] >> 8) & 0xFF);
         }
         return out;
     }
@@ -293,7 +294,7 @@ std::vector<uint8_t> unpack_pixels(const std::vector<uint16_t>& words,
         for (size_t i = 0; i < n_pixels; i++) {
             size_t wi = i / 4;
             int pos = (int)(i & 3);
-            int shift = (3 - pos) * 4;
+            int shift = ((3 - pos) * 4) ^ 8;   // 7..4, 3..0, 15..12, 11..8
             out[i] = (uint8_t)((words[wi] >> shift) & 0xF);
         }
         return out;
@@ -303,7 +304,7 @@ std::vector<uint8_t> unpack_pixels(const std::vector<uint16_t>& words,
         for (size_t i = 0; i < n_pixels; i++) {
             size_t wi = i / 16;
             int pos = (int)(i & 15);
-            int shift = 15 - pos;
+            int shift = (15 - pos) ^ 8;        // бит 7 .. 0, затем 15 .. 8
             out[i] = (uint8_t)((words[wi] >> shift) & 0x1);
         }
         return out;

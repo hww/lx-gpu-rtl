@@ -307,18 +307,19 @@ int main(int argc, char** argv) {
     set_step(1, 1);
     set_idx(1, 40);
 
-    record("8bpp read pix 40 (HI byte)", read_pixel(1), 0x00AA);
-    record("8bpp read pix 41 (LO byte)", read_pixel(1), 0x00BB);
+    // пиксель 0 = младший байт (чётный адрес), как видео Aleste
+    record("8bpp read pix 40 (LO byte)", read_pixel(1), 0x00BB);
+    record("8bpp read pix 41 (HI byte)", read_pixel(1), 0x00AA);
 
     set_idx(1, 41);
     write_pixel(1, 0x0055);
     flush_ch(1);
-    record("8bpp RMW write pix 41 -> RAM 20", sim_ram[20], 0xAA55);
+    record("8bpp RMW write pix 41 -> RAM 20", sim_ram[20], 0x55BB);
 
     // ----------------------------------------------------------------
     current_group = "4. 4bpp (FMT=2) Nibble RMW Blend";
     printf("\n[%s]\n", current_group.c_str());
-    sim_ram[30] = 0x1234;
+    sim_ram[30] = 0x3412;    // пиксели 0..3 = биты 7..4, 3..0, 15..12, 11..8
     set_mode_page(2, 2, 0);
     set_step(2, 1);
     set_idx(2, 120);
@@ -331,24 +332,24 @@ int main(int argc, char** argv) {
     set_idx(2, 122);
     write_pixel(2, 0xF);
     flush_ch(2);
-    record("4bpp RMW nibble 2 -> RAM 30", sim_ram[30], 0x12F4);
+    record("4bpp RMW nibble 2 -> RAM 30", sim_ram[30], 0xF412);
 
     // ----------------------------------------------------------------
     current_group = "5. 1bpp/2bpp Read & Write-Protect";
     printf("\n[%s]\n", current_group.c_str());
-    sim_ram[40] = 0x8001;
+    sim_ram[40] = 0x0180;    // пиксель 0 = бит 7, пиксель 8 = бит 15
     set_mode_page(3, 4, 0);
     set_step(3, 1);
     set_idx(3, 640);
-    record("1bpp read bit 15 (pix 640)", read_pixel(3), 1);
-    record("1bpp read bit 14 (pix 641)", read_pixel(3), 0);
+    record("1bpp read bit 7 (pix 640)", read_pixel(3), 1);
+    record("1bpp read bit 6 (pix 641)", read_pixel(3), 0);
 
     set_idx(3, 641);
     write_pixel(3, 1);
     flush_ch(3);
-    record("1bpp write-protect -> RAM 40 intact", sim_ram[40], 0x8001);
+    record("1bpp write-protect -> RAM 40 intact", sim_ram[40], 0x0180);
 
-    sim_ram[41] = 0xE400;
+    sim_ram[41] = 0x00E4;    // пиксели 0, 1 = биты 7..6, 5..4
     set_mode_page(3, 3, 0);
     set_step(3, 1);
     set_idx(3, 41 * 8);
@@ -358,25 +359,29 @@ int main(int argc, char** argv) {
     set_idx(3, 41 * 8);
     write_pixel(3, 0);
     flush_ch(3);
-    record("2bpp write-protect -> RAM 41 intact", sim_ram[41], 0xE400);
+    record("2bpp write-protect -> RAM 41 intact", sim_ram[41], 0x00E4);
 
     // ----------------------------------------------------------------
-    current_group = "6. LO8 (FMT=5) & HI8 (FMT=6)";
+    // (бывшие LO8/HI8: один байт на слово = 8 bpp с шагом 2 пикселя)
+    current_group = "6. 8bpp STEP=2 (one byte per word)";
     printf("\n[%s]\n", current_group.c_str());
     sim_ram[50] = 0x1122;
-    set_mode_page(0, 5, 0);
-    set_step(0, 0);          // <-- ДОБАВЬ ЭТУ СТРОКУ (чтобы указатель оставался на слове 50!)    
-    set_idx(0, 50);
+    sim_ram[51] = 0x3344;
+    set_mode_page(0, 1, 0);
+    set_step(0, 2);
+    set_idx(0, 100);         // младшие байты слов 50, 51
     write_pixel(0, 0x0099);
+    write_pixel(0, 0x0088);
     flush_ch(0);
-    record("LO8 write -> RAM 50", sim_ram[50], 0x1199);
+    record("8bpp STEP 2 low bytes -> RAM 50", sim_ram[50], 0x1199);
+    record("8bpp STEP 2 low bytes -> RAM 51", sim_ram[51], 0x3388);
 
-    set_mode_page(0, 6, 0);
-    set_step(0, 0);          // <-- ДОБАВЬ ЭТУ СТРОКУ (чтобы указатель оставался на слове 50!)
-    set_idx(0, 50);
+    set_idx(0, 101);         // старшие байты
     write_pixel(0, 0x0077);
+    write_pixel(0, 0x0066);
     flush_ch(0);
-    record("HI8 write -> RAM 50", sim_ram[50], 0x7799);
+    record("8bpp STEP 2 high bytes -> RAM 50", sim_ram[50], 0x7799);
+    record("8bpp STEP 2 high bytes -> RAM 51", sim_ram[51], 0x6688);
 
     // ----------------------------------------------------------------
     current_group = "7. Negative Step (STEP = -1)";
@@ -386,8 +391,8 @@ int main(int argc, char** argv) {
 set_mode_page(1, 1, 0);
 set_step(1, -1);
 set_idx(1, 121);
-record("Neg step read pix 121", read_pixel(1), 0x00CD);
-record("Neg step read pix 120", read_pixel(1), 0x00AB);
+record("Neg step read pix 121", read_pixel(1), 0x00AB);
+record("Neg step read pix 120", read_pixel(1), 0x00CD);
 // ----------------------------------------------------------------
 current_group = "8. Multi-Channel Copy (CH0 -> CH1)";
 printf("\n[%s]\n", current_group.c_str());

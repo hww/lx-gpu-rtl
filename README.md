@@ -19,7 +19,8 @@ Architecture specification: [XiAleste / Aleste LX GPU Documentation](https://hww
   - Zero-overhead hardware loops via `LOOP_CNT`, `LOOP_TGT`, and instruction bit `[31]` (`L`).
 - **4 Unified Memory Channels (`CH0..CH3`)**:
   - Each channel has `DATA`, `IDX`, `IDXH`, `STEP`, and `MODEPAGE` registers, backed by a 1-word write-back cache (`ch_cache`) and 20-bit fractional pixel address generator (`ch_addr_gen`).
-  - Supported formats: `16 bpp`, `8 bpp`, `4 bpp`, `2 bpp` (read-only), `1 bpp` (read-only), and byte pass-through (`LO8`, `HI8`).
+  - Supported formats: `16 bpp`, `8 bpp`, `4 bpp`, `2 bpp` (read-only) and `1 bpp` (read-only); 5..7 are reserved. One byte per word (the low or the high byte of each word) is `8 bpp` with `STEP = 2`.
+  - Pixel order, as the Aleste's video reads memory: bytes in address order (little-endian), and within each byte from the high bits. `8 bpp`: pixel 0 = bits 7..0, pixel 1 = bits 15..8; `4 bpp`: 7..4, 3..0, 15..12, 11..8; `1 bpp`: bit 7 first.
   - Reading or writing `DATA[ch]` automatically advances `IDX[ch]` by `STEP[ch]`. Out-of-page access (`64 KiB` boundary) halts the core with error code `2`.
 - **ROM Bootloader**:
   - Permanently resides in protected ROM words `0..31` (`boot/bootloader.asm`; writes to `0..31` halt with error code `1`).

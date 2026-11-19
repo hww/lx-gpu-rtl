@@ -33,7 +33,7 @@ module ch_blender (
     logic [15:0] pixel_c;
 
     assign fmt_c   = get_fmt_info(mode_i);
-    assign sh_c    = ~frac_i & fmt_c.s_mask;
+    assign sh_c    = pos_shift(fmt_c, frac_i);
     assign pixel_c = (dat_i >> sh_c) & fmt_c.pix_mask;
 
     // =====================================================================
@@ -53,7 +53,7 @@ module ch_blender (
     logic [15:0] blend_r;
 
     assign fmt_r   = get_fmt_info(mode_r);
-    assign sh_r    = ~frac_r & fmt_r.s_mask;
+    assign sh_r    = pos_shift(fmt_r, frac_r);
     assign mask_r  = fmt_r.pix_mask << sh_r;
     assign blend_r = fmt_r.wr_en ? ((word_r & ~mask_r) | ((pixel_r << sh_r) & mask_r))
                                  : word_r; // защита от записи в 1bpp/2bpp
