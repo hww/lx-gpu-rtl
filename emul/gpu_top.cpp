@@ -177,9 +177,11 @@ void GpuTop::write_special(uint8_t op, uint16_t val, bool& halted_by_err) {
                 halted_by_err = true;
                 return;
             }
-            uint16_t w_old = cache_.read_word(ch, addr_gen_.word(ch));
-            uint16_t w_new = ChBlender::blend(w_old, val, addr_gen_.mode(ch), addr_gen_.frac(ch));
-            cache_.write_word(ch, addr_gen_.word(ch), w_new);
+            // masked write: no read-modify-write, as in ch_blender.sv/ch_cache.sv
+            uint16_t msk = ChBlender::mask(addr_gen_.mode(ch), addr_gen_.frac(ch));
+            if (msk)
+                cache_.write_masked(ch, addr_gen_.word(ch),
+                                    ChBlender::place(val, addr_gen_.mode(ch), addr_gen_.frac(ch)), msk);
             addr_gen_.step_forward(ch);
             if (addr_gen_.page_ovf(ch)) {
                 halted_       = true;

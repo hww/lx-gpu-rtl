@@ -21,6 +21,7 @@ module gpu_fpga (
     output logic        wbm_we_o,
     output logic [23:0] wbm_adr_o,
     output logic [15:0] wbm_dat_o,
+    output logic [1:0]  wbm_sel_o,     // byte enables of a write
     input  logic [15:0] wbm_dat_i,
     input  logic        wbm_ack_i,
 
@@ -79,7 +80,7 @@ module gpu_fpga (
         .irq_o(irq_o),
         .irq_code_o(gpu_irq_code),
         .wb_cyc_o(wbm_cyc_g), .wb_stb_o(wbm_stb_g), .wb_we_o(wbm_we_g),
-        .wb_adr_o(wbm_adr_g), .wb_dat_o(wbm_dat_o_g),
+        .wb_adr_o(wbm_adr_g), .wb_dat_o(wbm_dat_o_g), .wb_sel_o(wbm_sel_o),
         .wb_dat_i(wbm_dat_i), .wb_ack_i(wbm_ack_g)
     );
 

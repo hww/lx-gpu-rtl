@@ -96,12 +96,15 @@ static void do_read(uint8_t mode, uint8_t frac, uint16_t word,
     result_line(name, fb, buf);
 }
 
-// write: RMW, 2 cache accesses via ack_i handshake
+// write: one cache access. The blender shifts the pixel into place and gives
+// the bit mask; the cache merges it into its word. The test merges it into
+// `word` the same way and checks the result.
+// Write-protected formats: no cache request, ack after one cycle.
 static void do_write(uint8_t mode, uint8_t frac, uint16_t word, uint16_t pixel,
                      uint16_t exp_word, const char* name) {
     int fb = errors;
+    bool prot = (mode >= 3);
 
-    // start write: cyc&stb&we
     dut->cyc_i   = 1;
     dut->stb_i   = 1;
     dut->we_i    = 1;
@@ -110,37 +113,34 @@ static void do_write(uint8_t mode, uint8_t frac, uint16_t word, uint16_t pixel,
     dut->dat_i   = 0;
     dut->pixel_i = pixel;
     dut->ack_i   = 0;
-    tick();                 // IDLE -> RMW_READ
-    dut->cyc_i = 0; dut->stb_i = 0; dut->we_i = 0;
     dut->eval();
 
-    check_bit("rmw_req.read",  dut->rmw_req_o, 1);
-    check_bit("rmw_we.read",   dut->rmw_we_o, 0);
+    uint16_t merged = (word & ~dut->rmw_msk_o) | (dut->rmw_dat_o & dut->rmw_msk_o);
+    if (prot) {
+        check_bit("rmw_req.prot", dut->rmw_req_o, 0);
+        test_fail("msk.prot", dut->rmw_msk_o, 0, 16);
+        check_bit("ack.wait", dut->ack_o, 0);
+        tick();
+        check_bit("ack.prot", dut->ack_o, 1);
+    } else {
+        check_bit("rmw_req", dut->rmw_req_o, 1);
+        check_bit("rmw_we",  dut->rmw_we_o, 1);
+        check_bit("ack.wait", dut->ack_o, 0);
+        dut->ack_i = 1;                 // the cache takes it
+        dut->eval();
+        check_bit("ack.write", dut->ack_o, 1);
+    }
+    test_fail("merged", merged, exp_word, 16);
 
-    // RMW_READ done: old word arrives via dat_i, ack_i pulse
-    dut->dat_i = word;
-    dut->ack_i = 1;
-    tick();                 // RMW_READ -> RMW_WRITE
-    dut->ack_i = 0;
-    dut->eval();
-
-    check_bit("rmw_req.write", dut->rmw_req_o, 1);
-    check_bit("rmw_we.write",  dut->rmw_we_o, 1);
-    test_fail("rmw_dat", dut->rmw_dat_o, exp_word, 16);
-
-    // RMW_WRITE done: ack_i pulse -> ack_o
-    dut->ack_i = 1;
     tick();
-    dut->ack_i = 0;
+    dut->cyc_i = 0; dut->stb_i = 0; dut->we_i = 0; dut->ack_i = 0;
     dut->eval();
-
-    check_bit("ack.write",     dut->ack_o, 1);
+    check_bit("ack.after",     dut->ack_o, 0);
     check_bit("rmw_req.after", dut->rmw_req_o, 0);
-    check_bit("rmw_we.after",  dut->rmw_we_o, 0);
 
-    char buf[32]; snprintf(buf, sizeof buf, "word=%04X", dut->rmw_dat_o);
+    char buf[32]; snprintf(buf, sizeof buf, "word=%04X", merged);
     result_line(name, fb, buf);
-    tick(); 
+    tick();
 }
 
 int main(int argc, char** argv) {
@@ -174,7 +174,7 @@ int main(int argc, char** argv) {
     do_read(5, 0x0, 0xABCD, 0xABCD, "rsv5.rd");
 
     // ===== writes (RMW) =====
-    header("Write (RMW & Write-Protect for 1bpp/2bpp)");
+    header("Write (masked, one access; write-protect for 1bpp/2bpp)");
     do_write(0, 0x0, 0xABCD, 0x1234, 0x1234, "16bpp.wr");
     do_write(1, 0x0, 0xABCD, 0x0012, 0xAB12, "8bpp.p0.wr");
     do_write(1, 0x8, 0xABCD, 0x0012, 0x12CD, "8bpp.p1.wr");

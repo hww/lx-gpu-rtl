@@ -52,6 +52,7 @@ module gpu_top #(
     output logic        wb_we_o,
     output logic [23:0] wb_adr_o,
     output logic [15:0] wb_dat_o,
+    output logic [1:0]  wb_sel_o,     // byte enables of a write ([0] = bits 7..0)
     input  logic [15:0] wb_dat_i,
     input  logic        wb_ack_i
 );
@@ -255,7 +256,7 @@ module gpu_top #(
         .flush_ack_o(ch_flush_ack),
         .status_o(ch_status), .error_o(ch_error),
         .wb_cyc_o(wb_cyc_o), .wb_stb_o(wb_stb_o), .wb_we_o(wb_we_o),
-        .wb_adr_o(wb_adr_o), .wb_dat_o(wb_dat_o),
+        .wb_adr_o(wb_adr_o), .wb_dat_o(wb_dat_o), .wb_sel_o(wb_sel_o),
         .wb_dat_i(wb_dat_i), .wb_ack_i(wb_ack_i),
         .preload_busy_o(ch_preload_busy),
         .preload_done_o(ch_preload_done)

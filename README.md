@@ -19,6 +19,9 @@ Architecture specification: [XiAleste / Aleste LX GPU Documentation](https://hww
   - Zero-overhead hardware loops via `LOOP_CNT`, `LOOP_TGT`, and instruction bit `[31]` (`L`).
 - **4 Unified Memory Channels (`CH0..CH3`)**:
   - Each channel has `DATA`, `IDX`, `IDXH`, `STEP`, and `MODEPAGE` registers, backed by a 1-word write-back cache (`ch_cache`) and 20-bit fractional pixel address generator (`ch_addr_gen`).
+  - Cache writes never read memory first: a pixel is merged into the cache word with a bit mask, a dirty mask is kept per nibble, and the write-back uses byte enables (`wb_sel_o`, SDRAM DQM), so `16 bpp` and `8 bpp` writes cost no reads at all. Only a word with a half-written byte (one `4 bpp` pixel of a pair) and no fill is read before its write-back. Reading a partly written word fills it and keeps the written nibbles.
+  - Write-backs go to a one-word posted write buffer shared by the four channels, so the core carries on while the word is written; reads from memory wait until the buffer is empty. `FLUSH` writes the channel's word back and also waits for the buffer: after `FLUSH` everything is in memory.
+  - Writing `MODEPAGE` with the page the channel already has cancels a pending page change (`A -> B -> A` with no access in between stays on `A`).
   - Supported formats: `16 bpp`, `8 bpp`, `4 bpp`, `2 bpp` (read-only) and `1 bpp` (read-only); 5..7 are reserved. One byte per word (the low or the high byte of each word) is `8 bpp` with `STEP = 2`.
   - Pixel order, as the Aleste's video reads memory: bytes in address order (little-endian), and within each byte from the high bits. `8 bpp`: pixel 0 = bits 7..0, pixel 1 = bits 15..8; `4 bpp`: 7..4, 3..0, 15..12, 11..8; `1 bpp`: bit 7 first.
   - Reading or writing `DATA[ch]` automatically advances `IDX[ch]` by `STEP[ch]`. Out-of-page access (`64 KiB` boundary) halts the core with error code `2`.

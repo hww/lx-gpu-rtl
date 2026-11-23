@@ -18,6 +18,8 @@ public:
 
     uint16_t read_word(uint8_t ch, uint16_t word_addr);
     void     write_word(uint8_t ch, uint16_t word_addr, uint16_t data);
+    // write the bits in `mask` without reading memory (see ch_cache.sv)
+    void     write_masked(uint8_t ch, uint16_t word_addr, uint16_t data, uint16_t mask);
     void     flush(uint8_t ch);
 
     uint64_t hits = 0;
@@ -26,6 +28,8 @@ public:
 
 private:
     void resolve_pending(uint8_t ch);
+    void write_back(uint8_t ch);        // dirty entry -> memory (byte mask, lazy fill)
+    void fill(uint8_t ch, uint16_t word_addr);
 
     Memory16& mem_;
     uint16_t  tag_[NUM_CH];
@@ -33,7 +37,9 @@ private:
     uint8_t   page_[NUM_CH];
     uint8_t   pend_page_[NUM_CH];
     bool      valid_[NUM_CH];
-    bool      dirty_[NUM_CH];
+    bool      dirty_[NUM_CH];   // dmask_ != 0
+    uint8_t   dmask_[NUM_CH];   // dirty nibbles
+    bool      full_[NUM_CH];    // the whole word is valid
     bool      pend_[NUM_CH];
 };
 

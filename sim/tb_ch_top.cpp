@@ -80,7 +80,7 @@ static void service_wishbone() {
     if (dut->wb_cyc_o && dut->wb_stb_o) {
         uint32_t word_addr = (dut->wb_adr_o >> 1) & 0x1FF;
         if (dut->wb_we_o) {
-            sim_ram[word_addr] = dut->wb_dat_o;
+            sim_ram[word_addr] = (sim_ram[word_addr] & ~((dut->wb_sel_o & 1 ? 0x00FF : 0) | (dut->wb_sel_o & 2 ? 0xFF00 : 0))) | (dut->wb_dat_o & ((dut->wb_sel_o & 1 ? 0x00FF : 0) | (dut->wb_sel_o & 2 ? 0xFF00 : 0)));
         } else {
             dut->wb_dat_i = sim_ram[word_addr];
         }

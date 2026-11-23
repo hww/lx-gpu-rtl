@@ -199,7 +199,7 @@ static void step() {
 
     if (dut->wb_cyc_o && dut->wb_stb_o) {
         uint32_t a = (dut->wb_adr_o >> 1) & (MEM_WORDS - 1);
-        if (dut->wb_we_o) mem[a] = dut->wb_dat_o;
+        if (dut->wb_we_o) mem[a] = (mem[a] & ~((dut->wb_sel_o & 1 ? 0x00FF : 0) | (dut->wb_sel_o & 2 ? 0xFF00 : 0))) | (dut->wb_dat_o & ((dut->wb_sel_o & 1 ? 0x00FF : 0) | (dut->wb_sel_o & 2 ? 0xFF00 : 0)));
         else              dut->wb_dat_i = mem[a];
         dut->wb_ack_i = 1;
     }

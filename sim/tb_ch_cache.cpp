@@ -16,20 +16,23 @@ static int checks = 0;
 #define CLR_BLD  "\033[1m"
 
 // fake Wishbone memory: 64K words (128 KB), enough for page 0x00..0x01
-#define WB_MEM_WORDS  (64 * 1024)
+#define WB_MEM_WORDS  (512 * 1024)   // pages 00..07
 static uint16_t wb_mem[WB_MEM_WORDS];
 
 static void wb_reset_mem() {
     for (int i = 0; i < WB_MEM_WORDS; i++) wb_mem[i] = 0;
 }
 
+static int wb_rd_cnt = 0, wb_wr_cnt = 0, wb_last_sel = 0;
+
 static void tick() {
     dut->wb_ack_i = 0;
     dut->wb_dat_i = 0;
     if (dut->wb_cyc_o && dut->wb_stb_o) {
         uint32_t a = (dut->wb_adr_o >> 1) & (WB_MEM_WORDS - 1);
+        if (dut->wb_we_o) { wb_wr_cnt++; wb_last_sel = dut->wb_sel_o; } else wb_rd_cnt++;
         if (dut->wb_we_o) {
-            wb_mem[a] = dut->wb_dat_o;
+            wb_mem[a] = (wb_mem[a] & ~((dut->wb_sel_o & 1 ? 0x00FF : 0) | (dut->wb_sel_o & 2 ? 0xFF00 : 0))) | (dut->wb_dat_o & ((dut->wb_sel_o & 1 ? 0x00FF : 0) | (dut->wb_sel_o & 2 ? 0xFF00 : 0)));
         } else {
             dut->wb_dat_i = wb_mem[a];
         }
@@ -74,7 +77,7 @@ static void reset() {
     dut->rst = 1;
     dut->ch_sel_i = 0; dut->ch_addr_i = 0;
     dut->ch_stb_i = 0; dut->ch_prefetch_i = 0;
-    dut->ch_we_i = 0;  dut->ch_dat_i = 0;
+    dut->ch_we_i = 0;  dut->ch_dat_i = 0; dut->ch_msk_i = 0;
     dut->page_we_i = 0; dut->page_i = 0;
     dut->flush_en_i = 0; dut->flush_sel_i = 0;
     dut->wb_ack_i = 0; dut->wb_dat_i = 0;
@@ -93,7 +96,8 @@ static void set_page(uint8_t ch, uint8_t page) {
 
 // read or write; wait for ack_o; *hit_out captured before fill
 static uint16_t do_access(uint8_t ch, uint16_t word, int we, uint16_t wdata,
-                          int* hit_out) {
+                          int* hit_out, uint16_t msk = 0xFFFF) {
+    dut->ch_msk_i  = msk;
     dut->ch_sel_i  = ch;
     dut->ch_addr_i = word;
     dut->ch_we_i   = we;
@@ -170,7 +174,7 @@ int main(int argc, char** argv) {
     }
 
     // ===== 4. write miss -> fill + write (dirty), then flush -> WB =====
-    header("write miss -> fill + dirty, flush -> WB");
+    header("write miss -> allocate + dirty, flush -> WB");
     {
         int fb = errors;
         dut->ch_sel_i  = 0;
@@ -178,6 +182,7 @@ int main(int argc, char** argv) {
         dut->ch_stb_i  = 1;
         dut->ch_we_i   = 1;
         dut->ch_dat_i  = 0xABCD;
+        dut->ch_msk_i  = 0xFFFF;
         tick();
         int to = 100;
         while (!dut->ack_o && to-- > 0) tick();
@@ -206,6 +211,7 @@ int main(int argc, char** argv) {
         dut->ch_stb_i  = 1;
         dut->ch_we_i   = 1;
         dut->ch_dat_i  = 0x1111;
+        dut->ch_msk_i  = 0xFFFF;
         tick();
         int to = 100;
         while (!dut->ack_o && to-- > 0) tick();
@@ -289,6 +295,135 @@ int main(int argc, char** argv) {
 
         char buf[48]; snprintf(buf, sizeof buf, "ch2=%04X ch3=%04X", r2, r3);
         result_line("per-channel", fb, buf);
+    }
+
+
+    // ===== 10. write miss reads nothing (16 bpp) =====
+    header("write miss: no read, flush writes the word");
+    {
+        int fb = errors;
+        set_page(0, 0x02);
+        wb_mem[(0x20100 >> 1)] = 0xDEAD;
+        wb_rd_cnt = wb_wr_cnt = 0;
+        do_access(0, 0x0080, 1, 0x4321, nullptr);
+        do_flush(0);
+        test_fail("nr.reads", wb_rd_cnt, 0, 8);
+        test_fail("nr.writes", wb_wr_cnt, 1, 8);
+        test_fail("nr.sel", wb_last_sel, 3, 8);
+        test_fail("nr.mem", wb_mem[(0x20100 >> 1)], 0x4321, 16);
+        result_line("16bpp no read", fb, "0 reads, 1 write");
+    }
+
+    // ===== 11. 8 bpp byte write: DQM, no read =====
+    header("8 bpp byte: byte mask, no read");
+    {
+        int fb = errors;
+        wb_mem[(0x20102 >> 1)] = 0xABCD;
+        wb_rd_cnt = wb_wr_cnt = 0;
+        do_access(0, 0x0081, 1, 0x0012, nullptr, 0x00FF);
+        do_flush(0);
+        test_fail("b8.reads", wb_rd_cnt, 0, 8);
+        test_fail("b8.sel", wb_last_sel, 1, 8);
+        test_fail("b8.mem", wb_mem[(0x20102 >> 1)], 0xAB12, 16);
+        char buf[48]; snprintf(buf, sizeof buf, "mem=%04X sel=%d", wb_mem[(0x20102 >> 1)], wb_last_sel);
+        result_line("8bpp byte", fb, buf);
+    }
+
+    // ===== 12. 8 bpp two bytes -> full word =====
+    header("8 bpp two bytes: full word");
+    {
+        int fb = errors;
+        wb_mem[(0x20104 >> 1)] = 0xABCD;
+        wb_rd_cnt = wb_wr_cnt = 0;
+        do_access(0, 0x0082, 1, 0x0034, nullptr, 0x00FF);
+        do_access(0, 0x0082, 1, 0x5600, nullptr, 0xFF00);
+        int hit = -1;
+        uint16_t r = do_access(0, 0x0082, 0, 0, &hit);
+        check_bit("b88.rdhit", hit, 1);
+        test_fail("b88.rd", r, 0x5634, 16);
+        do_flush(0);
+        test_fail("b88.reads", wb_rd_cnt, 0, 8);
+        test_fail("b88.sel", wb_last_sel, 3, 8);
+        test_fail("b88.mem", wb_mem[(0x20104 >> 1)], 0x5634, 16);
+        result_line("8bpp full", fb, "0 reads");
+    }
+
+    // ===== 13. 4 bpp half byte -> lazy fill at write-back =====
+    header("4 bpp nibble: lazy fill before write-back");
+    {
+        int fb = errors;
+        wb_mem[(0x20106 >> 1)] = 0xABCD;
+        wb_rd_cnt = wb_wr_cnt = 0;
+        do_access(0, 0x0083, 1, 0x0050, nullptr, 0x00F0);
+        do_flush(0);
+        test_fail("n4.reads", wb_rd_cnt, 1, 8);
+        test_fail("n4.mem", wb_mem[(0x20106 >> 1)], 0xAB5D, 16);
+        char buf[48]; snprintf(buf, sizeof buf, "mem=%04X", wb_mem[(0x20106 >> 1)]);
+        result_line("4bpp nibble", fb, buf);
+    }
+
+    // ===== 14. 4 bpp whole byte: no read =====
+    header("4 bpp two nibbles of a byte: no read");
+    {
+        int fb = errors;
+        wb_mem[(0x20108 >> 1)] = 0xABCD;
+        wb_rd_cnt = wb_wr_cnt = 0;
+        do_access(0, 0x0084, 1, 0x0070, nullptr, 0x00F0);
+        do_access(0, 0x0084, 1, 0x0008, nullptr, 0x000F);
+        do_flush(0);
+        test_fail("n44.reads", wb_rd_cnt, 0, 8);
+        test_fail("n44.sel", wb_last_sel, 1, 8);
+        test_fail("n44.mem", wb_mem[(0x20108 >> 1)], 0xAB78, 16);
+        result_line("4bpp byte", fb, "0 reads");
+    }
+
+    // ===== 15. read of a partly written word: merge fill =====
+    header("read of a partial entry: merge fill");
+    {
+        int fb = errors;
+        wb_mem[(0x2010A >> 1)] = 0x1122;
+        do_access(0, 0x0085, 1, 0x3400, nullptr, 0xFF00);
+        uint16_t r = do_access(0, 0x0085, 0, 0, nullptr);
+        test_fail("mf.rd", r, 0x3422, 16);
+        do_flush(0);
+        test_fail("mf.mem", wb_mem[(0x2010A >> 1)], 0x3422, 16);
+        char buf[48]; snprintf(buf, sizeof buf, "rd=%04X", r);
+        result_line("merge fill", fb, buf);
+    }
+
+    // ===== 16. posted write-back, then read it from another channel =====
+    header("posted write-back, read-after-write from another channel");
+    {
+        int fb = errors;
+        set_page(1, 0x02);
+        wb_mem[(0x20200 >> 1)] = 0x0000;
+        wb_mem[(0x20202 >> 1)] = 0x0000;
+        do_access(0, 0x0100, 1, 0xCAFE, nullptr);     // allocate, dirty
+        do_access(0, 0x0101, 1, 0xF00D, nullptr);     // miss on dirty: post 0x100
+        uint16_t r = do_access(1, 0x0100, 0, 0, nullptr);
+        test_fail("post.rd_other", r, 0xCAFE, 16);
+        do_flush(0);
+        test_fail("post.mem0", wb_mem[(0x20200 >> 1)], 0xCAFE, 16);
+        test_fail("post.mem1", wb_mem[(0x20202 >> 1)], 0xF00D, 16);
+        result_line("posted write", fb, "ordered");
+    }
+
+    // ===== 17. page A -> B -> A with no access keeps A =====
+    header("page A -> B -> A without access");
+    {
+        int fb = errors;
+        wb_mem[(0x30000 >> 1)] = 0x0A0A;
+        wb_mem[(0x40000 >> 1)] = 0x0B0B;
+        set_page(3, 0x03);
+        do_access(3, 0x0000, 0, 0, nullptr);
+        set_page(3, 0x04);
+        set_page(3, 0x03);
+        dut->ch_sel_i = 3;
+        tick();
+        test_fail("aba.page", dut->page_o, 0x03, 8);
+        uint16_t r = do_access(3, 0x0000, 0, 0, nullptr);
+        test_fail("aba.rd", r, 0x0A0A, 16);
+        result_line("A->B->A", fb, "stays on A");
     }
 
     // ===== summary =====

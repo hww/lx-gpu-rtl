@@ -39,6 +39,7 @@ module ch_top (
     output logic        wb_we_o,
     output logic [23:0] wb_adr_o,
     output logic [15:0] wb_dat_o,
+    output logic [1:0]  wb_sel_o,
     input  logic [15:0] wb_dat_i,
     input  logic        wb_ack_i
 );
@@ -58,6 +59,7 @@ module ch_top (
     logic        blend_rmw_req;
     logic        blend_rmw_we;
     logic [15:0] blend_rmw_dat;
+    logic [15:0] blend_rmw_msk;
 
     // --- Сигналы от gpu_cache ---
     logic [23:0] cache_addr24;
@@ -174,7 +176,8 @@ module ch_top (
         .ack_i(cache_ack),
         .rmw_req_o(blend_rmw_req),
         .rmw_we_o(blend_rmw_we),
-        .rmw_dat_o(blend_rmw_dat)
+        .rmw_dat_o(blend_rmw_dat),
+        .rmw_msk_o(blend_rmw_msk)
     );
 
     // --- Инстанс gpu_cache ---
@@ -186,6 +189,7 @@ module ch_top (
         .ch_prefetch_i(pe_prefetch  && pe_idx_valid),
         .ch_we_i(cache_we),
         .ch_dat_i(cache_wdata),
+        .ch_msk_i(blend_rmw_msk),
         .ch_hit_o(cache_hit),
         .ch_dat_o(cache_rdata),
         .ack_o(cache_ack),
@@ -200,6 +204,7 @@ module ch_top (
         .wb_we_o(wb_we_o),
         .wb_adr_o(wb_adr_o),
         .wb_dat_o(wb_dat_o),
+        .wb_sel_o(wb_sel_o),
         .wb_ack_i(wb_ack_i),
         .wb_dat_i(wb_dat_i),
         .addr24_o(cache_addr24)
