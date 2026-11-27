@@ -16,21 +16,22 @@ namespace lx {
 enum Operand : uint8_t {
     OP_R0         = 0,  // 0..31: R0..R31
     OP_ZERO       = 32,
-    OP_FLAGS      = 33, // {V, C, N, Z}
-    OP_BUSY       = 34, // {3'b0, page_ovf}
-    OP_SHADOW     = 35, // {flags, ret_pc[11:0]}
+    OP_FLAGS      = 33,
+    OP_BUSY       = 34,
+    OP_SHADOW     = 35,
     OP_LOOP_CNT   = 36,
     OP_LOOP_TGT   = 37,
     OP_ROML       = 38,
     OP_ROMH       = 39,
-    OP_ROMA       = 40, // Write-only
-    OP_MHI        = 41, // Read-only
-
+    OP_ROMA       = 40,
+    OP_MHI        = 41,
+    OP_BANK       = 42,
+    OP_RSV43      = 43,
     OP_DATA0      = 44, OP_DATA1 = 45, OP_DATA2 = 46, OP_DATA3 = 47,
-    OP_IDX0       = 48, OP_IDX1  = 49, OP_IDX2  = 50, OP_IDX3  = 51,
-    OP_IDXH0      = 52, OP_IDXH1 = 53, OP_IDXH2 = 54, OP_IDXH3 = 55,
-    OP_STEP0      = 56, OP_STEP1 = 57, OP_STEP2 = 58, OP_STEP3 = 59,
-    OP_MODEPAGE0  = 60, OP_MODEPAGE1 = 61, OP_MODEPAGE2 = 62, OP_MODEPAGE3 = 63
+    OP_W48        = 48, OP_W49 = 49, OP_W50 = 50, OP_W51 = 51,
+    OP_W52        = 52, OP_W53 = 53, OP_W54 = 54, OP_W55 = 55,
+    OP_W56        = 56, OP_W57 = 57, OP_W58 = 58, OP_W59 = 59,
+    OP_W60        = 60, OP_W61 = 61, OP_W62 = 62, OP_W63 = 63
 };
 
 class GpuTop {
@@ -105,10 +106,9 @@ private:
     uint16_t r_[32]       = {};
     bool     z_ = false, n_ = false, c_ = false, v_ = false;
     uint16_t mhi_         = 0;
-
     uint16_t roma_        = 0;
     uint16_t roml_        = 0;
-
+    uint8_t  bank_        = 0;
     bool     trace_       = false;
 };
 

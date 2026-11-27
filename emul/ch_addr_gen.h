@@ -1,4 +1,3 @@
-// === FILE: ch_addr_gen.h ===
 #pragma once
 #include <cstdint>
 #include "gpu_fmt.h"
@@ -10,27 +9,39 @@ public:
     static constexpr int NUM_CH = 4;
 
     ChAddrGen() { reset(); }
-
     void reset();
 
-    void write_mode(uint8_t ch, uint8_t mode);
-    void write_idxh(uint8_t ch, uint8_t idxh);
-    void write_idx(uint8_t ch, uint16_t idx);
-    void write_step(uint8_t ch, uint16_t step);
+    void write_banked(uint8_t bank, uint8_t group, uint8_t ch, uint16_t data);
+
+    uint16_t word(uint8_t ch) const;
+    uint8_t  frac(uint8_t ch) const;
+    uint8_t  mode(uint8_t ch) const    { return fmt_[ch & 3]; }
+    bool     clip_on(uint8_t ch) const { return clip_[ch & 3]; }
+    bool     shr_x(uint8_t ch) const   { return shrx_[ch & 3]; }
+    bool     shr_y(uint8_t ch) const   { return shry_[ch & 3]; }
+    uint16_t b(uint8_t ch) const       { return b_[ch & 3]; }
+    uint16_t key(uint8_t ch) const     { return key_[ch & 3]; }
+    uint16_t ctl(uint8_t ch) const     { return ctl_[ch & 3]; }
+    bool     inside(uint8_t ch) const;
+    bool     page_ovf(uint8_t ch) const;
+    bool     par(uint8_t ch) const     { return (xi_[ch&3] ^ yi_[ch&3]) & 1; }
 
     void step_forward(uint8_t ch);
+    void preload(uint8_t page, uint16_t word, uint16_t step_x);
 
-    uint16_t word(uint8_t ch) const     { return (idx_[ch & 3] >> 4) & 0x7FFF; }
-    uint8_t  frac(uint8_t ch) const     { return idx_[ch & 3] & 0x0F; }
-    uint8_t  mode(uint8_t ch) const     { return mode_[ch & 3]; }
-    bool     page_ovf(uint8_t ch) const { return (idx_[ch & 3] >> 19) & 1; }
-    uint32_t raw_idx(uint8_t ch) const  { return idx_[ch & 3]; }
+    uint32_t raw_idx(uint8_t ch) const;
 
 private:
-    uint8_t  mode_[NUM_CH];
-    uint8_t  idxh_[NUM_CH];
-    uint32_t idx_[NUM_CH];  // 20 бит: [19]=ovf, [18:4]=word, [3:0]=frac
-    uint32_t step_[NUM_CH]; // 20 бит (в доп. коде)
+    uint32_t pixel_index(uint8_t ch) const;
+
+    uint16_t xi_[NUM_CH], xf_[NUM_CH], yi_[NUM_CH], yf_[NUM_CH];
+    uint16_t dxi_[NUM_CH], dxf_[NUM_CH], dyi_[NUM_CH], dyf_[NUM_CH];
+    uint16_t xmin_[NUM_CH], ymin_[NUM_CH], xmax_[NUM_CH], ymax_[NUM_CH];
+    uint16_t b_[NUM_CH], key_[NUM_CH], ctl_[NUM_CH];
+    uint16_t pitch_[NUM_CH];
+    uint8_t  page_[NUM_CH];
+    uint8_t  fmt_[NUM_CH];
+    bool     clip_[NUM_CH], shrx_[NUM_CH], shry_[NUM_CH];
 };
 
 } // namespace lx

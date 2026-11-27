@@ -4,6 +4,74 @@
 #include <cstdio>
 #include <cstring>
 
+    namespace {
+uint16_t pixel_alu(uint16_t a, uint16_t b, uint16_t d, uint16_t k,
+                   uint16_t ctl, uint16_t mask,
+                   bool shr_x, bool shr_y, bool par,
+                   bool& rel_ok, bool& den_ok, bool& need_d)
+{
+    uint8_t op  = ctl & 0xF;
+    uint8_t sx  = (ctl >> 4) & 3;
+    uint8_t sy  = (ctl >> 6) & 3;
+    uint8_t cs  = (ctl >> 8) & 3;
+    uint8_t rel = (ctl >> 10) & 7;
+    bool    den = (ctl >> 13) & 1;
+    bool    dpar= (ctl >> 14) & 1;
+
+    a &= mask; b &= mask; d &= mask; k &= mask;
+    auto sel = [](uint8_t s, uint16_t A, uint16_t B, uint16_t D, uint16_t K) {
+        switch (s) { case 0: return A; case 1: return B; case 2: return D; default: return K; }
+    };
+    uint16_t x_sel = sel(sx, a, b, d, k);
+    uint16_t y_sel = sel(sy, a, b, d, k);
+    uint16_t x = shr_x ? (x_sel >> 1) : x_sel;
+    uint16_t y = shr_y ? (y_sel >> 1) : y_sel;
+
+    uint16_t sum   = static_cast<uint16_t>(x + y);
+    bool     over  = (static_cast<uint32_t>(x) + y) > mask;
+    bool     under = x < y;
+
+    uint16_t r_raw;
+    switch (op) {
+        case 0: r_raw = x; break;
+        case 1: r_raw = x & y; break;
+        case 2: r_raw = x | y; break;
+        case 3: r_raw = x ^ y; break;
+        case 4: r_raw = x & ~y; break;
+        case 5: r_raw = sum; break;
+        case 6: r_raw = over ? mask : sum; break;
+        case 7: r_raw = under ? 0 : static_cast<uint16_t>(x - y); break;
+        case 8: r_raw = static_cast<uint16_t>((x & b) | (y & ~b)); break;
+        default: r_raw = x; break;
+    }
+    uint16_t r = r_raw & mask;
+
+    uint16_t cp, cq;
+    switch (cs) {
+        case 0: cp = a; cq = k; break;
+        case 1: cp = d; cq = k; break;
+        case 2: cp = a; cq = d; break;
+        default: cp = d; cq = b; break;
+    }
+    bool eq = (cp == cq);
+    bool lt = (cp < cq);
+    switch (rel) {
+        case 0: rel_ok = true; break;
+        case 1: rel_ok = eq; break;
+        case 2: rel_ok = !eq; break;
+        case 3: rel_ok = lt; break;
+        case 4: rel_ok = !lt; break;
+        case 5: rel_ok = !lt && !eq; break;
+        case 6: rel_ok = lt || eq; break;
+        default: rel_ok = false; break;
+    }
+    den_ok = !den || (par == dpar);
+    need_d = (sx == 2) || (sy == 2)
+           || ((rel != 0) && (rel != 7) && (cs != 0));
+    return r;
+}
+} // namespace
+
 namespace lx {
 
 GpuTop::GpuTop(Memory16& mem)
@@ -20,6 +88,7 @@ void GpuTop::clear_core_state() {
     mhi_         = 0;
     roma_        = 0;
     roml_        = 0;
+    bank_        = 0;
 }
 
 void GpuTop::reset() {
@@ -49,13 +118,11 @@ void GpuTop::start(uint16_t entry) {
 }
 
 void GpuTop::gpu_start(uint32_t preload_addr24) {
-    // Аппаратный preload из ch_top.sv:
-    // Такт 1: CH0 MODE=0 (16bpp), PAGE=addr[23:16], IDX={1'b0, addr[15:1]}
-    // Такт 2: CH0 STEP=1
-    addr_gen_.write_mode(0, 0);
+    // v2 preload: CH0 = 16bpp, linear, XI = word, DXI = 1
+    addr_gen_.write_banked(4, 0, 0, 0x0000);                     // MODE_PAGE = 16bpp, page 0
     cache_.write_page(0, static_cast<uint8_t>((preload_addr24 >> 16) & 0xFF));
-    addr_gen_.write_idx(0, static_cast<uint16_t>((preload_addr24 >> 1) & 0x7FFF));
-    addr_gen_.write_step(0, 1);
+    addr_gen_.write_banked(0, 0, 0, static_cast<uint16_t>((preload_addr24 >> 1) & 0x7FFF));  // XI
+    addr_gen_.write_banked(1, 0, 0, 1);                          // DXI = 1
 
     clear_core_state();
     halted_      = false;
@@ -106,22 +173,21 @@ uint16_t GpuTop::read_special(uint8_t op, bool& halted_by_err) {
             return hi;
         }
         case OP_MHI:      return mhi_;
+        case OP_BANK:     return bank_;
         case OP_DATA0: case OP_DATA1: case OP_DATA2: case OP_DATA3: {
             uint8_t ch = op & 3;
-            if (addr_gen_.page_ovf(ch)) {
-                halted_      = true;
-                halt_code_   = 2;
-                halted_by_err = true;
-                return 0;
+            if (!addr_gen_.inside(ch) || addr_gen_.page_ovf(ch)) {
+                if (addr_gen_.inside(ch) && addr_gen_.page_ovf(ch)) {
+                    halted_       = true;
+                    halt_code_    = 2;
+                    halted_by_err = true;
+                }
+                addr_gen_.step_forward(ch);
+                return addr_gen_.key(ch);
             }
             uint16_t w   = cache_.read_word(ch, addr_gen_.word(ch));
             uint16_t pix = ChBlender::unpack(w, addr_gen_.mode(ch), addr_gen_.frac(ch));
             addr_gen_.step_forward(ch);
-            if (addr_gen_.page_ovf(ch)) {
-                halted_      = true;
-                halt_code_   = 2;
-                halted_by_err = true;
-            }
             return pix;
         }
         default:
@@ -169,40 +235,50 @@ void GpuTop::write_special(uint8_t op, uint16_t val, bool& halted_by_err) {
         case OP_ROMA:
             roma_ = val & 0xFFF;
             break;
+        case OP_BANK:
+            bank_ = val & 7;    // takes effect NEXT instruction
+            break;            
         case OP_DATA0: case OP_DATA1: case OP_DATA2: case OP_DATA3: {
             uint8_t ch = op & 3;
-            if (addr_gen_.page_ovf(ch)) {
-                halted_       = true;
-                halt_code_    = 2;
-                halted_by_err = true;
+            if (!addr_gen_.inside(ch) || addr_gen_.page_ovf(ch)) {
+                if (addr_gen_.inside(ch) && addr_gen_.page_ovf(ch)) {
+                    halted_       = true;
+                    halt_code_    = 2;
+                    halted_by_err = true;
+                }
+                addr_gen_.step_forward(ch);
                 return;
             }
-            // masked write: no read-modify-write, as in ch_blender.sv/ch_cache.sv
             uint16_t msk = ChBlender::mask(addr_gen_.mode(ch), addr_gen_.frac(ch));
-            if (msk)
-                cache_.write_masked(ch, addr_gen_.word(ch),
-                                    ChBlender::place(val, addr_gen_.mode(ch), addr_gen_.frac(ch)), msk);
-            addr_gen_.step_forward(ch);
-            if (addr_gen_.page_ovf(ch)) {
-                halted_       = true;
-                halt_code_    = 2;
-                halted_by_err = true;
+            if (msk) {
+                FmtInfo fi = get_fmt_info(addr_gen_.mode(ch));
+                bool rel_ok = true, den_ok = true, need_d = false;
+                pixel_alu(val, addr_gen_.b(ch), 0, addr_gen_.key(ch), addr_gen_.ctl(ch),
+                          fi.pix_mask, addr_gen_.shr_x(ch), addr_gen_.shr_y(ch),
+                          addr_gen_.par(ch), rel_ok, den_ok, need_d);
+                uint16_t d = 0;
+                if (need_d) {
+                    uint16_t w = cache_.read_word(ch, addr_gen_.word(ch));
+                    d = ChBlender::unpack(w, addr_gen_.mode(ch), addr_gen_.frac(ch));
+                }
+                uint16_t r = pixel_alu(val, addr_gen_.b(ch), d, addr_gen_.key(ch),
+                                       addr_gen_.ctl(ch), fi.pix_mask,
+                                       addr_gen_.shr_x(ch), addr_gen_.shr_y(ch),
+                                       addr_gen_.par(ch), rel_ok, den_ok, need_d);
+                if (rel_ok && den_ok)
+                    cache_.write_masked(ch, addr_gen_.word(ch),
+                                        ChBlender::place(r, addr_gen_.mode(ch), addr_gen_.frac(ch)), msk);
             }
+            addr_gen_.step_forward(ch);
             break;
         }
-        case OP_IDX0: case OP_IDX1: case OP_IDX2: case OP_IDX3:
-            addr_gen_.write_idx(op & 3, val);
-            break;
-        case OP_IDXH0: case OP_IDXH1: case OP_IDXH2: case OP_IDXH3:
-            addr_gen_.write_idxh(op & 3, static_cast<uint8_t>(val & 7));
-            break;
-        case OP_STEP0: case OP_STEP1: case OP_STEP2: case OP_STEP3:
-            addr_gen_.write_step(op & 3, val);
-            break;
-        case OP_MODEPAGE0: case OP_MODEPAGE1: case OP_MODEPAGE2: case OP_MODEPAGE3: {
-            uint8_t ch = op & 3;
-            addr_gen_.write_mode(ch, static_cast<uint8_t>((val >> 8) & 7));
-            cache_.write_page(ch, static_cast<uint8_t>(val & 0xFF));
+        case OP_W48: case OP_W49: case OP_W50: case OP_W51:
+        case OP_W52: case OP_W53: case OP_W54: case OP_W55:
+        case OP_W56: case OP_W57: case OP_W58: case OP_W59:
+        case OP_W60: case OP_W61: case OP_W62: case OP_W63: {
+            uint8_t grp = (op - 48) >> 2;
+            uint8_t ch  = op & 3;
+            addr_gen_.write_banked(bank_, grp, ch, val);
             break;
         }
         default:
@@ -220,7 +296,7 @@ int GpuTop::step() {
     // Декодирование полей слова инструкции (gpu_top.sv)
     bool     loop_bit = (ins >> 31) & 1;
     uint8_t  cls      = (ins >> 29) & 3;
-    bool     is_rr    = (cls == 0);
+    //bool     is_rr    = (cls == 0);
     bool     is_ldi   = (cls == 1);
     bool     is_ctrl  = (cls == 2);
     bool     is_imm   = (cls == 3);
