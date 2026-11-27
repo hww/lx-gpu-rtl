@@ -113,6 +113,19 @@ bool ChAddrGen::page_ovf(uint8_t ch) const {
 
 void ChAddrGen::step_forward(uint8_t ch) {
     ch &= 3;
+    if (pitch_[ch] == 0) {
+        // linear mode: {YI[2:0], XI, XF} += sign-extended {DXI, DXF}; the
+        // carry out of XI goes into YI[2:0], as in the RTL (l_sum)
+        uint64_t l = (static_cast<uint64_t>(yi_[ch] & 7) << 32)
+                   | (static_cast<uint64_t>(xi_[ch]) << 16) | xf_[ch];
+        int64_t  d = static_cast<int64_t>(static_cast<int16_t>(dxi_[ch])) * 65536
+                   + dxf_[ch];
+        l = (l + static_cast<uint64_t>(d)) & 0x7FFFFFFFFull;
+        xi_[ch] = static_cast<uint16_t>(l >> 16);
+        xf_[ch] = static_cast<uint16_t>(l & 0xFFFF);
+        yi_[ch] = static_cast<uint16_t>((yi_[ch] & ~7u) | ((l >> 32) & 7));
+        return;
+    }
     uint32_t x_sum = (static_cast<uint32_t>(xi_[ch]) << 16 | xf_[ch])
                    + (static_cast<uint32_t>(dxi_[ch]) << 16 | dxf_[ch]);
     uint32_t y_sum = (static_cast<uint32_t>(yi_[ch]) << 16 | yf_[ch])

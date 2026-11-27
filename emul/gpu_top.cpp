@@ -123,6 +123,17 @@ void GpuTop::gpu_start(uint32_t preload_addr24) {
     cache_.write_page(0, static_cast<uint8_t>((preload_addr24 >> 16) & 0xFF));
     addr_gen_.write_banked(0, 0, 0, static_cast<uint16_t>((preload_addr24 >> 1) & 0x7FFF));  // XI
     addr_gen_.write_banked(1, 0, 0, 1);                          // DXI = 1
+    // the rest is cleared as in the RTL (ch_addr_gen, pl_we_i): YI, XF, YF,
+    // DYI, DXF, DYF, ALU_CTL, PITCH. A YI left by the previous program would
+    // move the bootloader's reads into another 64 KB window.
+    addr_gen_.write_banked(0, 1, 0, 0);                          // YI
+    addr_gen_.write_banked(0, 2, 0, 0);                          // XF
+    addr_gen_.write_banked(0, 3, 0, 0);                          // YF
+    addr_gen_.write_banked(1, 1, 0, 0);                          // DYI
+    addr_gen_.write_banked(1, 2, 0, 0);                          // DXF
+    addr_gen_.write_banked(1, 3, 0, 0);                          // DYF
+    addr_gen_.write_banked(3, 2, 0, 0);                          // ALU_CTL
+    addr_gen_.write_banked(4, 1, 0, 0);                          // PITCH
 
     clear_core_state();
     halted_      = false;
@@ -279,6 +290,10 @@ void GpuTop::write_special(uint8_t op, uint16_t val, bool& halted_by_err) {
             uint8_t grp = (op - 48) >> 2;
             uint8_t ch  = op & 3;
             addr_gen_.write_banked(bank_, grp, ch, val);
+            // SURF.MODE_PAGE also carries the page for the cache, as in the
+            // RTL (ch_top: cache_page_we on bank 4, group 0)
+            if (bank_ == 4 && grp == 0)
+                cache_.write_page(ch, static_cast<uint8_t>(val & 0xFF));
             break;
         }
         default:
