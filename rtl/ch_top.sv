@@ -15,6 +15,11 @@
 //                               on D and writes R (or not).
 //   After every access (committed or not) the position advances by STEP.
 //
+// Timing (54 MHz on the MiSTer): the access waits until ch_addr_gen has the
+// channel's address in registers (rdy), and a write first latches A = wdata
+// (PH_A) so that neither the core ALU nor the YI*PITCH multiplier is in the
+// path of the cache write. A write costs one cycle more than a read.
+//
 // The cache merges a write into its entry with a bit mask and never has to
 // read memory first, so a partial-word write needs no read-modify-write here.
 //
@@ -69,7 +74,7 @@ module ch_top (
     logic [1:0]  ag_ach;
     logic [14:0] ag_word;
     logic [3:0]  ag_frac;
-    logic        ag_ovf, ag_inside, ag_par;
+    logic        ag_ovf, ag_inside, ag_par, ag_rdy;
     logic [2:0]  ag_mode;
     logic        ag_shr_x, ag_shr_y;
     logic [15:0] ag_b, ag_key, ag_ctl;
@@ -135,7 +140,7 @@ module ch_top (
         .req_i(data_req_i), .adv_i(ag_adv), .rd_i(ag_rd),
         .ach_o(ag_ach),
         .word_o(ag_word), .frac_o(ag_frac),
-        .ovf_o(ag_ovf), .inside_o(ag_inside), .par_o(ag_par),
+        .ovf_o(ag_ovf), .inside_o(ag_inside), .par_o(ag_par), .rdy_o(ag_rdy),
         .mode_o(ag_mode), .shr_x_o(ag_shr_x), .shr_y_o(ag_shr_y),
         .b_o(ag_b), .key_o(ag_key), .ctl_o(ag_ctl),
         .prefetch_o(ag_prefetch)
@@ -147,13 +152,19 @@ module ch_top (
     // =====================================================================
     // Pixel ALU. D is the pixel read in PH_1 (0 while it is not needed).
     // =====================================================================
-    logic        ph_r;                  // 0 = PH_1, 1 = PH_2 (D is in d_r)
+    // Phase of a DATA access:
+    //   PH_A : write only, latch A = wdata (no cache access)
+    //   PH_1 : the access (a read, a write, or the read of D)
+    //   PH_2 : write of R once D is known
+    localparam logic [1:0] PH_A = 2'd0, PH_1 = 2'd1, PH_2 = 2'd2;
+    logic [1:0]  ph_r;
+    logic [15:0] a_r;
     logic [15:0] d_r;
     logic [15:0] alu_r;
     logic        alu_rel_ok, alu_den_ok, alu_need_d;
 
     ch_pixel_alu u_alu (
-        .a_i(wdata_i), .b_i(ag_b), .d_i(ph_r ? d_r : 16'h0), .k_i(ag_key),
+        .a_i(a_r), .b_i(ag_b), .d_i((ph_r == PH_2) ? d_r : 16'h0), .k_i(ag_key),
         .ctl_i(ag_ctl), .mask_i(fi.pix_mask),
         .shr_x_i(ag_shr_x), .shr_y_i(ag_shr_y), .par_i(ag_par),
         .r_o(alu_r),
@@ -168,20 +179,22 @@ module ch_top (
 
     logic acc_active;                   // a cache operation is wanted now
     logic ph_we;                        // ... and it is a write
-    logic ph_nxt, latch_d, ack_c, did_rd;
+    logic latch_a, latch_d, ack_c, did_rd;
+    logic [1:0] ph_nxt;
 
     always_comb begin
         acc_active = 1'b0;
         ph_we      = 1'b0;
-        ph_nxt     = 1'b0;
+        ph_nxt     = ph_r;
+        latch_a    = 1'b0;
         latch_d    = 1'b0;
         ack_c      = 1'b0;
         did_rd     = 1'b0;
 
         if (data_req_i) begin
-            if (!ph_r) begin
-                // ---------------- PH_1 ----------------
-                if (!data_we_i) begin
+            if (!data_we_i) begin
+                // ---------------- read: wait for the address ----------------
+                if (ag_rdy) begin
                     if (skip_c) begin
                         ack_c = 1'b1;                        // reads KEY
                     end else begin
@@ -189,7 +202,14 @@ module ch_top (
                         ack_c      = cache_ack;
                         did_rd     = 1'b1;
                     end
-                end else begin
+                end
+            end else if (ph_r == PH_A) begin
+                // ---------------- PH_A: latch A ----------------
+                latch_a = 1'b1;
+                ph_nxt  = PH_1;
+            end else if (ph_r == PH_1) begin
+                // ---------------- PH_1 ----------------
+                if (ag_rdy) begin
                     if (skip_c || !fi.wr_en || !alu_den_ok) begin
                         ack_c = 1'b1;                        // skipped write
                     end else if (!alu_need_d) begin
@@ -204,7 +224,7 @@ module ch_top (
                         acc_active = 1'b1;                   // read D first
                         if (cache_ack) begin
                             latch_d = 1'b1;
-                            ph_nxt  = 1'b1;
+                            ph_nxt  = PH_2;
                         end
                     end
                 end
@@ -217,18 +237,22 @@ module ch_top (
                     acc_active = 1'b1;
                     ph_we      = 1'b1;
                     ack_c      = cache_ack;
-                    if (!cache_ack) ph_nxt = 1'b1;
                 end
             end
+            if (ack_c) ph_nxt = PH_A;
+        end else begin
+            ph_nxt = PH_A;                                   // no access
         end
     end
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            ph_r <= 1'b0;
+            ph_r <= PH_A;
+            a_r  <= 16'h0;
             d_r  <= 16'h0;
         end else begin
             ph_r <= ph_nxt;
+            if (latch_a) a_r <= wdata_i;
             if (latch_d) d_r <= blend_dat;
         end
     end
@@ -302,7 +326,7 @@ module ch_top (
 
     // Page overflow: only for an access that is not clipped away
     logic ovf_hit, ovf_r;
-    assign ovf_hit = data_req_i && ag_inside && ag_ovf;
+    assign ovf_hit = ack_c && ag_inside && ag_ovf;
 
     always_ff @(posedge clk) begin
         if (rst || pl_start) ovf_r <= 1'b0;

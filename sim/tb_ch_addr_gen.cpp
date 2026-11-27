@@ -109,6 +109,16 @@ static void do_access(uint8_t ch, int we, int rd) {
     dut->rd_i  = 0;
 }
 
+// The address of a channel is recomputed by a shared unit, one channel per
+// cycle, after its position / clip / surface registers change (rdy_o = 0
+// meanwhile). Let the unit catch up: at most one cycle per channel.
+static void settle() {
+    dut->req_i = 0; dut->adv_i = 0; dut->rd_i = 0;
+    dut->reg_we_i = 0; dut->pl_we_i = 0;
+    for (int i = 0; i < 4; i++) tick();
+    dut->eval();
+}
+
 static void header(const char* t) {
     printf("\n" CLR_BLD CLR_YEL "=== %s ===" CLR_RST "\n", t);
 }
@@ -119,8 +129,7 @@ static void expect_lin(const char* name, uint8_t ch, uint8_t fmt,
                        uint16_t exp_word, uint8_t exp_frac) {
     write_mode_page(ch, 0, fmt, 0, 0, 0);
     set_linear_idx(ch, idx19);
-    // let combinational settle
-    dut->eval();
+    settle();
     int fails_before = errors;
     check("word_o", dut->word_o, exp_word, 15);
     check("frac_o", dut->frac_o, exp_frac, 4);
@@ -192,7 +201,7 @@ int main(int argc, char** argv) {
         wr(0, 4, 1, 0x0000);            // PITCH=0
         wr(0, 0, 0, 0xFFFF);            // XI
         wr(0, 0, 1, 7);                 // YI = 7
-        dut->eval();
+        settle();
         int f = errors;
         check_bit("ovf_o", dut->ovf_o, 1);
         printf(CLR_CYN "  %-22s" CLR_RST " -> ", "linear ovf");
@@ -210,6 +219,9 @@ int main(int argc, char** argv) {
         wr(1, 0, 2, 0); wr(1, 0, 3, 0);
         dut->eval();
         int f = errors;
+        check_bit("rdy after write", dut->rdy_o, 0);
+        tick(); dut->eval();
+        check_bit("rdy one cycle later", dut->rdy_o, 1);
         // idx = 2*320 + 10 = 650 = 0x028A; k=0 -> word=0x028A, frac=0
         check("2D.word", dut->word_o, 0x028A, 15);
         check("2D.frac", dut->frac_o, 0, 4);
@@ -228,14 +240,14 @@ int main(int argc, char** argv) {
         wr(2, 2, 3, 5);                 // YMAX = 5
         wr(2, 0, 0, 3); wr(2, 0, 1, 3);
         wr(2, 0, 2, 0); wr(2, 0, 3, 0);
-        dut->eval();
+        settle();
         int f = errors;
         check_bit("inside (3,3)", dut->inside_o, 1);
         wr(2, 0, 0, 6);                 // XI = 6 -> outside
-        dut->eval();
+        settle();
         check_bit("outside (6,3)", dut->inside_o, 0);
         wr(2, 0, 0, 5);                 // XI = 5 -> inside (inclusive)
-        dut->eval();
+        settle();
         check_bit("inside (5,3)", dut->inside_o, 1);
         printf(CLR_CYN "  %-22s" CLR_RST " -> ", "clip");
         if (errors == f) printf(CLR_GRN "OK" CLR_RST "\n"); else printf("\n");
@@ -255,7 +267,7 @@ int main(int argc, char** argv) {
         wr(3, 1, 1, 0); wr(3, 1, 2, 0); wr(3, 1, 3, 0);
         // make ach = ch3 by the last reg_we cycle
         do_access(3, /*we*/1, /*rd*/0);
-        dut->eval();
+        settle();
         int f = errors;
         check("adv4.word", dut->word_o, 0x048D, 15);
         check("adv4.frac", dut->frac_o, 0x4, 4);
@@ -271,7 +283,7 @@ int main(int argc, char** argv) {
         wr(3, 0, 2, 0); wr(3, 0, 3, 0);
         wr(3, 1, 0, 8); wr(3, 1, 1, 0); wr(3, 1, 2, 0); wr(3, 1, 3, 0);
         do_access(3, 1, 0);
-        dut->eval();
+        settle();
         int f = errors;
         check("adv16.word", dut->word_o, 0x123C, 15);
         check("adv16.frac", dut->frac_o, 0x0, 4);
@@ -288,7 +300,7 @@ int main(int argc, char** argv) {
         wr(3, 1, 0, 0xFFFF);            // DXI = -1
         wr(3, 1, 1, 0); wr(3, 1, 2, 0); wr(3, 1, 3, 0);
         do_access(3, 1, 0);
-        dut->eval();
+        settle();
         int f = errors;
         check("advneg.word", dut->word_o, 0x0919, 15);
         check("advneg.frac", dut->frac_o, 0x8, 4);
@@ -306,7 +318,7 @@ int main(int argc, char** argv) {
         tick();
         dut->pl_we_i = 0;
         select_ch(0);
-        dut->eval();
+        settle();
         int f = errors;
         // preload: 16bpp, linear, XI=pl_idx, DXI=1 -> word = pl_idx
         check("pl.word", dut->word_o, 0x0040, 15);
@@ -328,6 +340,7 @@ int main(int argc, char** argv) {
         int f = errors;
         // a cache read arms pf (rd_i=1)
         do_access(0, /*we*/0, /*rd*/1);
+        tick();                       // address of the next position
         tick();                       // pf_cond settles -> prefetch_r <= 1
         dut->eval();
         check_bit("prefetch.pulse", dut->prefetch_o, 1);

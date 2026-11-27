@@ -25,6 +25,14 @@
 //                the carry out of XI goes into YI[2:0], as the old IDX/IDXH)
 // The index goes through ({idx, 4'b0} >>> k): word = [18:4], frac = [3:0].
 // Anything non-zero above bit 18 (negative index included) is a page overflow.
+//
+// Timing: the address of every channel (word, frac, overflow, clip test,
+// parity) is kept in registers. One shared address unit (multiplier, shifter,
+// clip compares) recomputes the address of a channel whose position or
+// surface changed, one channel per cycle. An access waits for rdy_o, so the
+// multiplier is never in the path of a cache access. The address is ready
+// one cycle after a register write or a step: a channel accessed on every
+// instruction waits one cycle; two channels used alternately do not wait.
 module ch_addr_gen (
     input  logic        clk,
     input  logic        rst,
@@ -57,6 +65,7 @@ module ch_addr_gen (
     output logic        ovf_o,      // index outside the 64 KB page
     output logic        inside_o,   // inside the clip window (1 if CLIP_ON = 0)
     output logic        par_o,      // (XI ^ YI)[0]
+    output logic        rdy_o,      // the outputs above are valid for ach_o
 
     // mode / pen of the channel
     output logic [2:0]  mode_o,     // FMT
@@ -109,55 +118,76 @@ module ch_addr_gen (
     assign ach   = (req_i || reg_we_i || pl_we_i) ? ch_i : last_ch_r;
     assign ach_o = ach;
 
-    // ===== selected channel =====
+    // ===== selected channel (position advance, outputs) =====
     logic [15:0] xi_c, xf_c, yi_c, yf_c, dxi_c, dxf_c, dyi_c, dyf_c;
-    logic [15:0] xmin_c, ymin_c, xmax_c, ymax_c, pitch_c;
-    logic [2:0]  fmt_c;
-    logic        clip_c;
+    logic [15:0] pitch_c;
 
     always_comb begin
         xi_c    = xi_r[ach];    xf_c   = xf_r[ach];
         yi_c    = yi_r[ach];    yf_c   = yf_r[ach];
         dxi_c   = dxi_r[ach];   dxf_c  = dxf_r[ach];
         dyi_c   = dyi_r[ach];   dyf_c  = dyf_r[ach];
-        xmin_c  = xmin_r[ach];  ymin_c = ymin_r[ach];
-        xmax_c  = xmax_r[ach];  ymax_c = ymax_r[ach];
         pitch_c = pitch_r[ach];
-        fmt_c   = fmt_r[ach];
-        clip_c  = clip_r[ach];
     end
 
-    assign mode_o  = fmt_c;
+    assign mode_o  = fmt_r[ach];
     assign shr_x_o = shrx_r[ach];
     assign shr_y_o = shry_r[ach];
     assign b_o     = b_r[ach];
     assign key_o   = key_r[ach];
     assign ctl_o   = ctl_r[ach];
-    assign par_o   = xi_c[0] ^ yi_c[0];
 
-    // ===== clip window (signed, inclusive) =====
-    assign inside_o = !clip_c ||
-                      (($signed(xi_c) >= $signed(xmin_c)) && ($signed(xi_c) <= $signed(xmax_c)) &&
-                       ($signed(yi_c) >= $signed(ymin_c)) && ($signed(yi_c) <= $signed(ymax_c)));
+    // ===== registered address of every channel =====
+    logic [14:0]       aw_r   [0:NUM_CH-1];
+    logic [3:0]        af_r   [0:NUM_CH-1];
+    logic [NUM_CH-1:0] aovf_r, ains_r, apar_r, av_r;
 
-    // ===== pixel index -> word / frac =====
-    logic               lin_c;
-    logic signed [39:0] prod_c;
-    logic        [39:0] pidx_c, sh_in_c;
-    logic signed [39:0] sh_out_c;
-    fmt_info_t          fmt_info_c;
+    assign word_o   = aw_r[ach];
+    assign frac_o   = af_r[ach];
+    assign ovf_o    = aovf_r[ach];
+    assign inside_o = ains_r[ach];
+    assign par_o    = apar_r[ach];
+    assign rdy_o    = av_r[ach];
 
-    assign lin_c      = (pitch_c == 16'h0000);
-    assign prod_c     = $signed(yi_c) * $signed({1'b0, pitch_c});
-    assign pidx_c     = lin_c ? {21'b0, yi_c[2:0], xi_c}
-                              : (prod_c + {{24{xi_c[15]}}, xi_c});
-    assign sh_in_c    = pidx_c << 4;
-    assign fmt_info_c = get_fmt_info(fmt_c);
-    assign sh_out_c   = $signed(sh_in_c) >>> fmt_info_c.k;
+    // ===== shared address unit: lowest channel whose address is stale =====
+    // Selected from registers only, so the unit does not depend on the core.
+    logic [1:0] uc;
+    logic       u_go;
+    always_comb begin
+        u_go = !(&av_r);
+        uc   = !av_r[0] ? 2'd0 : !av_r[1] ? 2'd1 : !av_r[2] ? 2'd2 : 2'd3;
+    end
 
-    assign word_o = sh_out_c[18:4];
-    assign frac_o = sh_out_c[3:0];
-    assign ovf_o  = |sh_out_c[39:19];
+    logic [15:0] u_xi, u_yi, u_pitch;
+    logic [15:0] u_xmin, u_ymin, u_xmax, u_ymax;
+    logic [2:0]  u_fmt;
+    logic        u_clip;
+    always_comb begin
+        u_xi    = xi_r[uc];     u_yi   = yi_r[uc];    u_pitch = pitch_r[uc];
+        u_xmin  = xmin_r[uc];   u_ymin = ymin_r[uc];
+        u_xmax  = xmax_r[uc];   u_ymax = ymax_r[uc];
+        u_fmt   = fmt_r[uc];    u_clip = clip_r[uc];
+    end
+
+    logic               u_lin, u_inside;
+    logic signed [39:0] u_prod;
+    logic        [39:0] u_pidx, u_sh_in;
+    logic signed [39:0] u_sh_out;
+    fmt_info_t          u_fi;
+
+    assign u_inside = !u_clip ||
+                      (($signed(u_xi) >= $signed(u_xmin)) && ($signed(u_xi) <= $signed(u_xmax)) &&
+                       ($signed(u_yi) >= $signed(u_ymin)) && ($signed(u_yi) <= $signed(u_ymax)));
+    assign u_lin    = (u_pitch == 16'h0000);
+    assign u_prod   = $signed(u_yi) * $signed({1'b0, u_pitch});
+    assign u_pidx   = u_lin ? {21'b0, u_yi[2:0], u_xi}
+                            : (u_prod + {{24{u_xi[15]}}, u_xi});
+    assign u_sh_in  = u_pidx << 4;
+    assign u_fi     = get_fmt_info(u_fmt);
+    assign u_sh_out = $signed(u_sh_in) >>> u_fi.k;
+
+    logic lin_c;
+    assign lin_c = (pitch_c == 16'h0000);
 
     // ===== position advance =====
     logic [34:0] l_sum;
@@ -180,10 +210,35 @@ module ch_addr_gen (
     // compare words (last_word_r used to be updated in the same cycle the
     // arm was set, so the compare was always false).
     logic pf_cond;
-    assign pf_cond = pf_arm_r[ach] && inside_o && !ovf_o &&
+    assign pf_cond = pf_arm_r[ach] && rdy_o && inside_o && !ovf_o &&
                      !req_i && !reg_we_i && !pl_we_i;
 
-    assign prefetch_o = prefetch_r && (ach == pf_ch_r) && !req_i && !reg_we_i && !pl_we_i;
+    assign prefetch_o = prefetch_r && (ach == pf_ch_r) && rdy_o && !req_i && !reg_we_i && !pl_we_i;
+
+    // ===== address invalidation: position, clip or surface of a channel =====
+    logic [NUM_CH-1:0] inval;
+    always_comb begin
+        inval = '0;
+        if (adv_i)                                   inval[ach]  = 1'b1;
+        if (reg_we_i && (bank_i == 3'd0 || bank_i == 3'd2 || bank_i == 3'd4))
+                                                     inval[ch_i] = 1'b1;
+        if (pl_we_i)                                 inval[ch_i] = 1'b1;
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            av_r <= '0;
+        end else begin
+            if (u_go && !inval[uc]) begin
+                aw_r[uc]   <= u_sh_out[18:4];
+                af_r[uc]   <= u_sh_out[3:0];
+                aovf_r[uc] <= |u_sh_out[39:19];
+                ains_r[uc] <= u_inside;
+                apar_r[uc] <= u_xi[0] ^ u_yi[0];
+            end
+            av_r <= (av_r | ((u_go && !inval[uc]) ? (4'b0001 << uc) : 4'b0000)) & ~inval;
+        end
+    end
 
     // ===== registers =====
     always_ff @(posedge clk) begin

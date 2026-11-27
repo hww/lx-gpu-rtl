@@ -50,7 +50,7 @@ gpu-top: asm $(wildcard tools/*.h) | $(BUILD)
 		-Mdir $(CURDIR)/$(BUILD)/sim_top \
 		rtl/gpu_fmt_pkg.sv \
 		rtl/core_alu.sv rtl/core_regfile.sv rtl/core_cond.sv rtl/core_fetch.sv rtl/core_rom.sv \
-		rtl/ch_addr_gen.sv rtl/ch_blender.sv rtl/ch_cache.sv rtl/ch_top.sv \
+		rtl/ch_addr_gen.sv rtl/ch_blender.sv rtl/ch_cache.sv rtl/ch_top.sv rtl/ch_pixel_alu.sv \
 		rtl/gpu_top.sv \
 		$(CURDIR)/sim/main_gpu_top.cpp $(CURDIR)/sim/image_io.cpp
 
