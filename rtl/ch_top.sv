@@ -1,26 +1,45 @@
 `timescale 1ns/1ps
 `default_nettype none
 
+// ch_top (v2): channel unit = position generator + pixel ALU + packer + cache.
+//
+// A DATA access is the only event that starts a pixel operation.
+//
+//   read  DATA : clipped / out of page -> KEY, no cache access;
+//                else one cache read, the pixel is unpacked by ch_blender.
+//   write DATA : A = wdata. Skipped (no cache access) when clipped, out of
+//                page, the format is write-protected, or the screen-door /
+//                REL gate says no. Otherwise
+//                  NEED_D = 0 : one masked cache write of R = OP(X, Y);
+//                  NEED_D = 1 : PH_1 reads D, PH_2 evaluates the ALU and REL
+//                               on D and writes R (or not).
+//   After every access (committed or not) the position advances by STEP.
+//
+// The cache merges a write into its entry with a bit mask and never has to
+// read memory first, so a partial-word write needs no read-modify-write here.
+//
+// Handshake: data_ack_o is combinational, high in the cycle the operation
+// completes (cache ack, or at once for a skipped access). The core holds the
+// request until then. data_rdata_o does not depend on wdata_i.
 module ch_top (
     input  logic        clk,
     input  logic        rst,
 
-    // Сигнал старта от хоста
+    // host START: preload channel 0 (16 bpp, linear, XI = word, DXI = 1)
     input  logic        preload_i,
     input  logic [23:0] preload_addr_i,
 
     input  logic [1:0]  ch_i,
-    
-    // Регистры канала (от процессора)
-    input  logic        idx_we_i,
-    input  logic        idxh_we_i,
-    input  logic        step_we_i,
-    input  logic        modepage_we_i,
+
+    // banked register write (from the core)
+    input  logic        reg_we_i,
+    input  logic [2:0]  reg_bank_i,
+    input  logic [1:0]  reg_grp_i,
     input  logic [15:0] wdata_i,
     output logic        preload_busy_o,
-    output logic        preload_done_o, 
-    
-    // Доступ к DATA (от процессора)
+    output logic        preload_done_o,
+
+    // DATA access (from the core)
     input  logic        data_req_i,
     input  logic        data_we_i,
     output logic        data_ack_o,
@@ -44,16 +63,19 @@ module ch_top (
     input  logic        wb_ack_i
 );
 
-    // --- Сигналы от pixel_engine ---
-    logic [14:0] pe_word;
-    logic [3:0]  pe_frac;
-    logic [2:0]  pe_mode;
-    logic        pe_prefetch;
-    logic        pe_access_done;
-    logic        pe_page_ovf;
-    logic        pe_idx_valid;
+    `include "rtl/gpu_fmt_pkg.sv"
 
-    // --- Сигналы от pixel_blender ---
+    // --- from ch_addr_gen ---
+    logic [1:0]  ag_ach;
+    logic [14:0] ag_word;
+    logic [3:0]  ag_frac;
+    logic        ag_ovf, ag_inside, ag_par;
+    logic [2:0]  ag_mode;
+    logic        ag_shr_x, ag_shr_y;
+    logic [15:0] ag_b, ag_key, ag_ctl;
+    logic        ag_prefetch;
+
+    // --- from ch_blender ---
     logic [15:0] blend_dat;
     logic        blend_ack;
     logic        blend_rmw_req;
@@ -61,7 +83,7 @@ module ch_top (
     logic [15:0] blend_rmw_dat;
     logic [15:0] blend_rmw_msk;
 
-    // --- Сигналы от gpu_cache ---
+    // --- from ch_cache ---
     logic [23:0] cache_addr24;
     logic        cache_hit;
     logic [15:0] cache_rdata;
@@ -69,15 +91,9 @@ module ch_top (
     logic [7:0]  cache_page;
     logic        cache_flush_done;
 
-    // --- Мультиплексоры: что писать в pixel_engine и gpu_cache ---
-    logic        pe_mode_we, pe_idxh_we, pe_idx_we, pe_step_we;
-    logic [2:0]  pe_mode_val, pe_idxh_val;
-    logic [15:0] pe_idx_val, pe_step_val;
-    logic        cache_page_we;
-    logic [7:0]  cache_page_val;
-
     // =====================================================================
-    // preload: такт 1 -> MODE=0 (16bpp), PAGE, IDX; такт 2 -> STEP=1
+    // preload: cycle 1 -> channel 0 = 16 bpp, linear, page, XI, DXI = 1;
+    // cycle 2 only delays preload_done (same timing as before)
     // =====================================================================
     logic pl_start, pl_step;
 
@@ -93,84 +109,150 @@ module ch_top (
     logic [1:0] ch_sel;
     assign ch_sel = (pl_start || pl_step) ? 2'd0 : ch_i;
 
+    // MODE_PAGE write (bank 4, group 0) also carries the page for the cache
+    logic        cache_page_we;
+    logic [7:0]  cache_page_val;
     always_comb begin
-        pe_mode_we     = modepage_we_i;
-        pe_mode_val    = wdata_i[10:8];
-
-        pe_idxh_we     = idxh_we_i;
-        pe_idxh_val    = wdata_i[2:0];
-
-        pe_idx_we      = idx_we_i;
-        pe_idx_val     = wdata_i;
-
-        pe_step_we     = step_we_i;
-        pe_step_val    = wdata_i;
-
-        cache_page_we  = modepage_we_i;
+        cache_page_we  = reg_we_i && (reg_bank_i == 3'd4) && (reg_grp_i == 2'd0);
         cache_page_val = wdata_i[7:0];
-
         if (pl_start) begin
-            pe_mode_we     = 1'b1;
-            pe_mode_val    = 3'd0; // 16 bpp в новой кодировке (k=0)
             cache_page_we  = 1'b1;
             cache_page_val = preload_addr_i[23:16];
-            pe_idx_we      = 1'b1;
-            pe_idx_val     = {1'b0, preload_addr_i[15:1]};
-        end
-
-        if (pl_step) begin
-            pe_step_we  = 1'b1;
-            pe_step_val = 16'd1; // 1 пиксель (= 1 слово для 16 bpp)
         end
     end
 
     // =====================================================================
-    // Арбитраж доступа к кэшу:
-    // - Чтение (data_we_i == 0): прямой запрос в кэш
-    // - Запись (data_we_i == 1): через RMW-автомат блендера
-    // - !cache_ack гарантирует сброс строба на 1 такт между фазами RMW
+    // Position generator, clip, address, per-channel registers
     // =====================================================================
-    logic        cache_stb;
-    logic        cache_we;
-    logic [15:0] cache_wdata;
+    logic ag_adv, ag_rd;
 
-    assign cache_stb = pe_idx_valid && !cache_ack &&
-                   (data_we_i ? blend_rmw_req : data_req_i);
-
-
-
-    assign cache_we    = data_we_i ? blend_rmw_we  : 1'b0;
-    assign cache_wdata = blend_rmw_dat;
-
-
-    // --- Инстанс pixel_engine ---
     ch_addr_gen u_pe (
         .clk(clk), .rst(rst),
         .ch_i(ch_sel),
-        .mode_we_i(pe_mode_we), .mode_i(pe_mode_val),
-        .idxh_we_i(pe_idxh_we), .idxh_i(pe_idxh_val),
-        .idx_we_i(pe_idx_we),   .idx_i(pe_idx_val),
-        .step_we_i(pe_step_we), .step_i(pe_step_val),
-        .access_i(data_req_i && pe_idx_valid),
-        .access_done_i(pe_access_done),
-        .word_o(pe_word),
-        .frac_o(pe_frac),
-        .mode_o(pe_mode),
-        .page_ovf_o(pe_page_ovf),
-        .prefetch_o(pe_prefetch),
-        .idx_valid_o(pe_idx_valid)
+        .reg_we_i(reg_we_i && !pl_start),
+        .bank_i(reg_bank_i), .grp_i(reg_grp_i), .wdata_i(wdata_i),
+        .pl_we_i(pl_start), .pl_idx_i({1'b0, preload_addr_i[15:1]}),
+        .req_i(data_req_i), .adv_i(ag_adv), .rd_i(ag_rd),
+        .ach_o(ag_ach),
+        .word_o(ag_word), .frac_o(ag_frac),
+        .ovf_o(ag_ovf), .inside_o(ag_inside), .par_o(ag_par),
+        .mode_o(ag_mode), .shr_x_o(ag_shr_x), .shr_y_o(ag_shr_y),
+        .b_o(ag_b), .key_o(ag_key), .ctl_o(ag_ctl),
+        .prefetch_o(ag_prefetch)
     );
 
-    // --- Инстанс pixel_blender ---
+    fmt_info_t fi;
+    assign fi = get_fmt_info(ag_mode);
+
+    // =====================================================================
+    // Pixel ALU. D is the pixel read in PH_1 (0 while it is not needed).
+    // =====================================================================
+    logic        ph_r;                  // 0 = PH_1, 1 = PH_2 (D is in d_r)
+    logic [15:0] d_r;
+    logic [15:0] alu_r;
+    logic        alu_rel_ok, alu_den_ok, alu_need_d;
+
+    ch_pixel_alu u_alu (
+        .a_i(wdata_i), .b_i(ag_b), .d_i(ph_r ? d_r : 16'h0), .k_i(ag_key),
+        .ctl_i(ag_ctl), .mask_i(fi.pix_mask),
+        .shr_x_i(ag_shr_x), .shr_y_i(ag_shr_y), .par_i(ag_par),
+        .r_o(alu_r),
+        .rel_ok_o(alu_rel_ok), .den_ok_o(alu_den_ok), .need_d_o(alu_need_d)
+    );
+
+    // =====================================================================
+    // Access sequencing
+    // =====================================================================
+    logic skip_c;                       // no memory access for this position
+    assign skip_c = !ag_inside || ag_ovf;
+
+    logic acc_active;                   // a cache operation is wanted now
+    logic ph_we;                        // ... and it is a write
+    logic ph_nxt, latch_d, ack_c, did_rd;
+
+    always_comb begin
+        acc_active = 1'b0;
+        ph_we      = 1'b0;
+        ph_nxt     = 1'b0;
+        latch_d    = 1'b0;
+        ack_c      = 1'b0;
+        did_rd     = 1'b0;
+
+        if (data_req_i) begin
+            if (!ph_r) begin
+                // ---------------- PH_1 ----------------
+                if (!data_we_i) begin
+                    if (skip_c) begin
+                        ack_c = 1'b1;                        // reads KEY
+                    end else begin
+                        acc_active = 1'b1;
+                        ack_c      = cache_ack;
+                        did_rd     = 1'b1;
+                    end
+                end else begin
+                    if (skip_c || !fi.wr_en || !alu_den_ok) begin
+                        ack_c = 1'b1;                        // skipped write
+                    end else if (!alu_need_d) begin
+                        if (!alu_rel_ok) begin
+                            ack_c = 1'b1;                    // REL says no
+                        end else begin
+                            acc_active = 1'b1;
+                            ph_we      = 1'b1;
+                            ack_c      = cache_ack;
+                        end
+                    end else begin
+                        acc_active = 1'b1;                   // read D first
+                        if (cache_ack) begin
+                            latch_d = 1'b1;
+                            ph_nxt  = 1'b1;
+                        end
+                    end
+                end
+            end else begin
+                // ---------------- PH_2: D is known ----------------
+                did_rd = 1'b1;
+                if (!alu_rel_ok) begin
+                    ack_c = 1'b1;                            // REL on D says no
+                end else begin
+                    acc_active = 1'b1;
+                    ph_we      = 1'b1;
+                    ack_c      = cache_ack;
+                    if (!cache_ack) ph_nxt = 1'b1;
+                end
+            end
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            ph_r <= 1'b0;
+            d_r  <= 16'h0;
+        end else begin
+            ph_r <= ph_nxt;
+            if (latch_d) d_r <= blend_dat;
+        end
+    end
+
+    // cache request: the strobe drops in the cycle of the ack
+    logic        cache_stb, cache_we;
+    assign cache_stb = acc_active && !cache_ack;
+    assign cache_we  = ph_we;
+
+    assign ag_adv = ack_c;
+    assign ag_rd  = did_rd;
+
+    // =====================================================================
+    // Blender and cache
+    // =====================================================================
     ch_blender u_blender (
         .clk(clk), .rst(rst),
-        .cyc_i(data_req_i && pe_idx_valid),
-        .stb_i(data_req_i && pe_idx_valid),
-        .we_i(data_we_i),
-        .mode_i(pe_mode),
-        .frac_i(pe_frac),
+        .cyc_i(acc_active),
+        .stb_i(acc_active),
+        .we_i(ph_we),
+        .mode_i(ag_mode),
+        .frac_i(ag_frac),
         .dat_i(cache_rdata),
-        .pixel_i(wdata_i),
+        .pixel_i(alu_r),
         .dat_o(blend_dat),
         .ack_o(blend_ack),
         .ack_i(cache_ack),
@@ -180,15 +262,14 @@ module ch_top (
         .rmw_msk_o(blend_rmw_msk)
     );
 
-    // --- Инстанс gpu_cache ---
     ch_cache u_cache (
         .clk(clk), .rst(rst),
-        .ch_sel_i(ch_sel),
-        .ch_addr_i(pe_word),
+        .ch_sel_i(ag_ach),
+        .ch_addr_i(ag_word),
         .ch_stb_i(cache_stb),
-        .ch_prefetch_i(pe_prefetch  && pe_idx_valid),
+        .ch_prefetch_i(ag_prefetch),
         .ch_we_i(cache_we),
-        .ch_dat_i(cache_wdata),
+        .ch_dat_i(blend_rmw_dat),
         .ch_msk_i(blend_rmw_msk),
         .ch_hit_o(cache_hit),
         .ch_dat_o(cache_rdata),
@@ -210,13 +291,25 @@ module ch_top (
         .addr24_o(cache_addr24)
     );
 
-    // --- Handshake для процессора и сдвига IDX (строго 1 импульс на запрос) ---
+    // =====================================================================
+    // Outputs
+    // =====================================================================
+    // Read data: KEY for a read outside the clip window (or the page), else
+    // the unpacked pixel. Selected by registers only (no path from wdata_i).
+    assign data_ack_o   = ack_c;
+    assign data_rdata_o = skip_c ? (ag_key & fi.pix_mask) : blend_dat;
+    assign flush_ack_o  = cache_flush_done;
 
-    assign pe_access_done = blend_ack;
-    assign data_ack_o     = blend_ack;
-    assign data_rdata_o   = blend_dat;
-    assign flush_ack_o    = cache_flush_done;
-    assign status_o       = {3'b0, pe_page_ovf};
-    assign error_o        = pe_page_ovf;
+    // Page overflow: only for an access that is not clipped away
+    logic ovf_hit, ovf_r;
+    assign ovf_hit = data_req_i && ag_inside && ag_ovf;
+
+    always_ff @(posedge clk) begin
+        if (rst || pl_start) ovf_r <= 1'b0;
+        else if (ovf_hit)    ovf_r <= 1'b1;
+    end
+
+    assign status_o = {3'b0, ovf_r};
+    assign error_o  = ovf_hit;
 
 endmodule

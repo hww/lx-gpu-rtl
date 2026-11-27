@@ -1,44 +1,56 @@
+; test_sprite.asm — v2, без прозрачности
+; Копирует 16x16 8bpp спрайт из pixel 0x0400 в экран 320x200 8bpp по (100,100).
+; Тело цикла — 2 инструкции: чтение пикселя + запись.
+; XI1 двигается через DXI1=1, R3 — только между строками (+320).
 .org 0x20
-        ; --- Канал 0: источник (спрайт 16x16 по адресу 0x0400) ---
-        LDI     R5, #0x0100      ; PC=0x020: FMT=1 (8bpp), PAGE=0
-        MOV     PAGE0, R5        ; PC=0x021
-        LDI     R5, #1           ; PC=0x022: STEP0 = 1 пиксель
-        MOV     STEP0, R5        ; PC=0x023
-        MOV     IDXH0, #0        ; PC=0x024
-        LDI     R4, #0x0400      ; PC=0x025: IDX0 = 0x0400
-        MOV     IDX0, R4         ; PC=0x026
 
-        ; --- Канал 1: экран 320x200 (база 0x0800) ---
-        LDI     R5, #0x0100      ; PC=0x027: FMT=1 (8bpp), PAGE=0
-        MOV     PAGE1, R5        ; PC=0x028
-        LDI     R5, #1           ; PC=0x029: STEP1 = 1 пиксель
-        MOV     STEP1, R5        ; PC=0x02A
-        MOV     IDXH1, #0        ; PC=0x02B
+; ---- CH0: спрайт 16x16 @ pixel 0x0400, 8bpp, linear ----
+        MOV     BANK, #4
+        LDI     R5, #0x0100         ; FMT=1 (8bpp), PAGE=0
+        MOV     W48, R5             ; MODE_PAGE0
+        MOV     BANK, #1
+        LDI     R5, #1
+        MOV     W48, R5             ; DXI0 = 1
+        MOV     BANK, #0
+        LDI     R4, #0x0400
+        MOV     W48, R4             ; XI0 = 0x0400
+        MOV     W52, #0             ; YI0 = 0
 
-        ; --- Настройка координат и аппаратного цикла ---
-        LDI     R3, #0x8564      ; PC=0x02C: (X=100, Y=100) -> 0x0800 + 100*320 + 100
-        LDI     R6, #320         ; PC=0x02D: ширина экрана
-        LDI     R1, #16          ; PC=0x02E: внешний счётчик: 16 строк
-        LDI     R0, #16          ; PC=0x02F: ширина спрайта: 16 пикселей
-        LDI     R4, #0x0034      ; PC=0x030: адрес col_loop (PC=0x034)
-        MOV     LOOP_TGT, R4     ; PC=0x031
+; ---- CH1: экран @ (100,100), 8bpp, linear ----
+        MOV     BANK, #4
+        LDI     R5, #0x0100
+        MOV     W49, R5             ; MODE_PAGE1
+        MOV     BANK, #1
+        LDI     R5, #1
+        MOV     W49, R5             ; DXI1 = 1
+        MOV     BANK, #0
+; ---- Blending ---
+        MOV     BANK, #3            ; PEN
+        LDI     R5, #0x0800         ; ALU_CTL: REL=NE, CS=A?K, OP=PASS
+        MOV     W57, R5             ; ALU_CTL1
+        LDI     R5, #0
+        MOV     W53, R5             ; KEY1 = 0
+        MOV     BANK, #0
+; ---- Инициализация цикла ----
+        LDI     R3, #0x8564         ; 0x800 (bg base) + 100*320 + 100
+        LDI     R6, #320            ; ширина экрана
+        LDI     R1, #16             ; 16 строк
+        LDI     R0, #16             ; 16 пикселей в строке
+        LDI     R4, #col_loop
+        MOV     LOOP_TGT, R4
 
 row_loop:
-        MOV     R7, R3           ; PC=0x032: R7 = текущий адрес пикселя в строке
-        MOV     LOOP_CNT, R0     ; PC=0x033: запуск аппаратного цикла на 16 пикселей
+        MOV     W49, R3             ; XI1 = начало строки
+        MOV     W53, #0             ; YI1 = 0
+        MOV     LOOP_CNT, R0        ; цикл 16 пикселей
 
 col_loop:
-        MOV     R2, DATA0        ; PC=0x034: читаем пиксель спрайта
-        OR      R2, R2           ; PC=0x035: проверяем на прозрачность (0)
-        JMP.EQ  skip_pixel       ; PC=0x036: если 0 — пропускаем запись
-        MOV     IDX1, R7         ; PC=0x037: ставим адрес приёмника
-        MOV     DATA1, R2        ; PC=0x038: пишем непрозрачный пиксель
-skip_pixel:
-      L ADD     R7, #1           ; PC=0x039: конец тела цикла (L-префикс!) -> возврат на 0x034
+        MOV     R2, DATA0           ; прочитать пиксель спрайта
+      L MOV     DATA1, R2           ; записать в экран, L = конец цикла
 
-        ADD     R3, R6           ; PC=0x03A: следующая строка экрана (R3 += 320)
-        SUB     R1, #1           ; PC=0x03B: уменьшаем счётчик строк
-        JMP.NE  row_loop         ; PC=0x03C: повторяем 16 строк
+        ADD     R3, R6              ; R3 += 320 -> следующая строка
+        SUB     R1, #1
+        JMP.NE  row_loop
 
-        FLUSH   1                ; PC=0x03D: сброс кэша канала 1 в RAM
-        HALT                     ; PC=0x03E
+        FLUSH   1
+        HALT

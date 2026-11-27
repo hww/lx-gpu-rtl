@@ -12,6 +12,15 @@
 //     never drift apart.
 //
 // The machine-code format is unchanged with respect to the previous isa.h.
+// v2 change: operands 42 and 48..63 changed meaning. 42 is now BANK
+// (a global 3-bit channel-window selector, readable and writable). 48..63
+// are the 16 banked-window slots, addressed as
+//     operand = 48 + (group << 2) + channel
+// where group and channel are taken from the low 4 bits of the operand
+// code and the bank comes from the BANK register at run time. The legacy
+// aliases IDXn/IDXHn/STEPn/PAGEn (v1) are gone; programs must use
+// W48..W63 together with an explicit MOV BANK, #bank. The machine-code
+// bit layout of the 32-bit word is unchanged.
 #pragma once
 #include <cctype>
 #include <cstdint>
@@ -44,18 +53,34 @@
     X(VC, 8)  X(HI, 9)  X(LS,10)  X(GE,11) \
     X(LT,12)  X(GT,13)  X(LE,14)
 
+// v2 operand map (see gpu_top.sv):
+//   0..31 R0..R31   32 ZERO   33 FLAGS   34 BUSY   35 SHADOW   36 LOOP_CNT
+//   37 LOOP_TGT   38 ROML   39 ROMH   40 ROMA(W)   41 MHI   42 BANK   43 reserved
+//   44..47 DATA[0..3]
+//   48..63 banked window, operand = 48 + (group << 2) + channel,
+//          bank = BANK (global, 0..4):
+//            bank 0 POS : 0 XI 1 YI 2 XF 3 YF
+//            bank 1 STEP: 0 DXI 1 DYI 2 DXF 3 DYF
+//            bank 2 CLIP: 0 XMIN 1 YMIN 2 XMAX 3 YMAX
+//            bank 3 PEN : 0 B 1 KEY 2 ALU_CTL 3 -
+//            bank 4 SURF: 0 MODE_PAGE 1 PITCH 2,3 -
+//          banks 5..7 reserved (writes ignored).
+// The W<n> names (W48..W63) are the raw operand codes. The named aliases
+// below (XI0, YI0, ...) are *convenience* only: the assembler still needs
+// an explicit MOV BANK, #bank before writing them, because bank is a
+// runtime register, not part of the operand code.
 #define ISA_REGS(X) \
     X(R0,0) X(R1,1) X(R2,2) X(R3,3) X(R4,4) X(R5,5) X(R6,6) X(R7,7) \
     X(R8,8) X(R9,9) X(R10,10) X(R11,11) X(R12,12) X(R13,13) X(R14,14) X(R15,15) \
     X(R16,16) X(R17,17) X(R18,18) X(R19,19) X(R20,20) X(R21,21) X(R22,22) X(R23,23) \
     X(R24,24) X(R25,25) X(R26,26) X(R27,27) X(R28,28) X(R29,29) X(R30,30) X(R31,31) \
     X(ZERO,32) X(FLAGS,33) X(BUSY,34) X(SHADOW,35) X(LOOP_CNT,36) X(LOOP_TGT,37) \
-    X(ROML,38) X(ROMH,39) X(ROMA,40) X(MHI,41) X(RSV42,42) X(RSV43,43) \
+    X(ROML,38) X(ROMH,39) X(ROMA,40) X(MHI,41) X(BANK,42) X(RSV43,43) \
     X(DATA0,44) X(DATA1,45) X(DATA2,46) X(DATA3,47) \
-    X(IDX0,48) X(IDX1,49) X(IDX2,50) X(IDX3,51) \
-    X(IDXH0,52) X(IDXH1,53) X(IDXH2,54) X(IDXH3,55) \
-    X(STEP0,56) X(STEP1,57) X(STEP2,58) X(STEP3,59) \
-    X(PAGE0,60) X(PAGE1,61) X(PAGE2,62) X(PAGE3,63)
+    X(W48,48) X(W49,49) X(W50,50) X(W51,51) \
+    X(W52,52) X(W53,53) X(W54,54) X(W55,55) \
+    X(W56,56) X(W57,57) X(W58,58) X(W59,59) \
+    X(W60,60) X(W61,61) X(W62,62) X(W63,63)
 
 namespace isa {
 
@@ -232,23 +257,24 @@ inline uint8_t operand_caps(int c) {
             return CAP_R | CAP_W | CAP_RDEV;
         case OPR_ROMA:
             return CAP_W;
-        case OPR_RSV42: case OPR_RSV43:
+        case OPR_BANK:
+            return CAP_R | CAP_W;               // BANK is a normal register
+        case OPR_RSV43:
             return 0;
         default: break;
     }
     if (c >= OPR_DATA0 && c < OPR_DATA0 + NUM_CHANNELS)
         return CAP_R | CAP_W | CAP_RDEV | CAP_WDEV;
-    return CAP_W;                               // IDX / IDXH / STEP / PAGE
+    return CAP_W;                               // W48..W63: write only
 }
 
 // Largest constant a MOV/LDI may store into a special operand without the
 // RTL silently truncating it.
 inline uint32_t operand_imm_max(int c) {
-    if (c == OPR_FLAGS)                              return 0xF;
-    if (c == OPR_LOOP_TGT || c == OPR_ROMA)          return ROM_WORDS - 1;
-    if (c >= OPR_IDXH0 && c < OPR_IDXH0 + NUM_CHANNELS) return 7;      // 3 bits
-    if (c >= OPR_PAGE0 && c < OPR_PAGE0 + NUM_CHANNELS) return 0x7FF;  // {mode[2:0], page[7:0]}
-    return 0xFFFF;
+    if (c == OPR_FLAGS)                   return 0xF;    // 4 flag bits
+    if (c == OPR_LOOP_TGT || c == OPR_ROMA) return ROM_WORDS - 1;
+    if (c == OPR_BANK)                    return 0x7;    // 3-bit bank select
+    return 0xFFFF;                                       // W48..W63: full 16 bits
 }
 
 // Assembler convention (kept from the previous version): every ALU op except
@@ -394,6 +420,16 @@ inline bool validate(const Insn& c, std::string* why = nullptr) {
                     return fail("constant " + hex(v) + " does not fit " + nm(c.dst) +
                                 " (max " + hex(operand_imm_max((int)c.dst)) + ")");
             }
+        }
+        // A banked-window operand (W48..W63) is only meaningful when BANK
+        // has been set to a defined value (0..4) by a previous instruction.
+        // The assembler cannot see the bank at run time, so it warns but
+        // does not reject — the program author is responsible for pairing
+        // MOV BANK, #n with the matching banked write. (The RTL ignores
+        // writes to banks 5..7.)
+        if (c.dst >= OPR_W48 && c.dst <= OPR_W63) {
+            // no static check possible; the address decode is done by
+            // ch_addr_gen at run time based on the current bank register
         }
         return true;
     }

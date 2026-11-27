@@ -20,9 +20,13 @@
 //
 // Operand map (6 bits):
 //   0..31 R0..R31   32 ZERO   33 FLAGS   34 BUSY   35 SHADOW   36 LOOP_CNT
-//   37 LOOP_TGT   38 ROML   39 ROMH   40 ROMA(W)   41 MHI   42..43 reserved
-//   44..47 DATA[0..3]   48..51 IDX[0..3]   52..55 IDXH[0..3]
-//   56..59 STEP[0..3]   60..63 MODEPAGE[0..3]
+//   37 LOOP_TGT   38 ROML   39 ROMH   40 ROMA(W)   41 MHI   42 BANK   43 reserved
+//   44..47 DATA[0..3]   48..63 banked window (write only), channels v2:
+//     group = dst[3:2], channel = dst[1:0], bank = BANK (global, 0..4)
+//     bank 0 POS : XI YI XF YF         bank 1 STEP: DXI DYI DXF DYF
+//     bank 2 CLIP: XMIN YMIN XMAX YMAX bank 3 PEN : B KEY ALU_CTL -
+//     bank 4 SURF: MODE_PAGE PITCH - -  banks 5..7 reserved (writes ignored)
+//   A write to BANK takes effect with the next instruction.
 // Special operands as destination: MOV only (assembler rule).
 module gpu_top #(
     // bootloader image for ROM words 0-31 (the rest is zero); relative to where
@@ -126,7 +130,8 @@ module gpu_top #(
 
     // channel unit
     logic [1:0]  t_ch_sel;
-    logic        t_ch_idx_we, t_ch_idxh_we, t_ch_step_we, t_ch_modepage_we;
+    logic        t_ch_reg_we;
+    logic [2:0]  bank_r;
     logic        t_ch_data_req, t_ch_data_we, t_ch_flush_req;
     logic        ch_data_ack, ch_flush_ack;
     logic        ch_error /* verilator public_flat_rw */;
@@ -247,8 +252,7 @@ module gpu_top #(
         .clk(clk), .rst(rst),
         .preload_i(gpu_start_i), .preload_addr_i(gpu_addr_i),
         .ch_i(t_ch_sel),
-        .idx_we_i(t_ch_idx_we), .idxh_we_i(t_ch_idxh_we),
-        .step_we_i(t_ch_step_we), .modepage_we_i(t_ch_modepage_we),
+        .reg_we_i(t_ch_reg_we), .reg_bank_i(bank_r), .reg_grp_i(x_dst[3:2]),
         .wdata_i(alu_result),
         .data_req_i(t_ch_data_req), .data_we_i(t_ch_data_we),
         .data_ack_o(ch_data_ack), .data_rdata_o(ch_data_rdata),
@@ -279,6 +283,7 @@ module gpu_top #(
             6'd38: t_sp_rdata = rom_acc_rdata[15:0];
             6'd39: t_sp_rdata = rom_acc_rdata[31:16];
             6'd41: t_sp_rdata = t_mhi_r;
+            6'd42: t_sp_rdata = {13'h0, bank_r};
             6'd44, 6'd45, 6'd46, 6'd47: t_sp_rdata = ch_data_rdata;
             default: t_sp_rdata = 16'h0;        // ZERO, W-only, reserved
         endcase
@@ -362,10 +367,17 @@ module gpu_top #(
     // ================================================================
     assign t_ch_sel = x_is_ch_rd ? x_src[1:0] : x_dst[1:0];
 
-    assign t_ch_idx_we      = x_do && x_sp_dst && (x_dst[5:2] == 4'b1100);
-    assign t_ch_idxh_we     = x_do && x_sp_dst && (x_dst[5:2] == 4'b1101);
-    assign t_ch_step_we     = x_do && x_sp_dst && (x_dst[5:2] == 4'b1110);
-    assign t_ch_modepage_we = x_do && x_sp_dst && (x_dst[5:2] == 4'b1111);
+    // Banked window 48..63. x_exec, not x_do: a banked write is not a device
+    // access (x_busy = 0), so both are equal, but x_exec does not depend on
+    // the channel's ack, which keeps the channel address select loop-free.
+    assign t_ch_reg_we = x_exec && x_sp_dst && (x_dst[5:4] == 2'b11);
+
+    // BANK (42): global bank select for the banked window. Takes effect with
+    // the next instruction (written in X, read in X of the next one).
+    always_ff @(posedge clk) begin
+        if (rst || t_clear)                              bank_r <= 3'd0;
+        else if (x_do && x_sp_dst && (x_dst == 6'd42))   bank_r <= alu_result[2:0];
+    end
 
     // ================================================================
     // Run control: HALT, IRQ, hardware errors, host START / RESET
@@ -417,3 +429,4 @@ module gpu_top #(
     assign pc_o        = fu_pc;
 
 endmodule
+

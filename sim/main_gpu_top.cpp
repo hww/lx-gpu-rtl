@@ -186,9 +186,12 @@ static void step() {
     // --- ЛОГ WISHBONE (только при -v) ---
     if (g_verbose && dut->wb_cyc_o && dut->wb_stb_o) {
         uint32_t addr = (dut->wb_adr_o >> 1) & (MEM_WORDS - 1);
-        // Достаем IDX и STEP из pixel_engine (канал 0)
-        uint32_t idx_cur  = dut->rootp->gpu_top__DOT__u_ch__DOT__u_pe__DOT__reg_idx;
-        uint32_t step_cur = dut->rootp->gpu_top__DOT__u_ch__DOT__u_pe__DOT__reg_step;
+        // Позиция и шаг канала 0 из ch_addr_gen v2:
+        // полный линейный индекс = {yi_r[0][2:0], xi_r[0]}, шаг = dxi_r[0].
+        uint32_t xi_cur   = dut->rootp->gpu_top__DOT__u_ch__DOT__u_pe__DOT__xi_r[0];
+        uint32_t yi_cur   = dut->rootp->gpu_top__DOT__u_ch__DOT__u_pe__DOT__yi_r[0];
+        uint32_t idx_cur  = ((yi_cur & 7) << 16) | (xi_cur & 0xFFFF);
+        uint32_t step_cur = dut->rootp->gpu_top__DOT__u_ch__DOT__u_pe__DOT__dxi_r[0];
         printf("[WB] %s adr=0x%04X dat=0x%04X (IDX=0x%05X STEP=0x%05X)\n",
                dut->wb_we_o ? "WR" : "RD",
                (unsigned)dut->wb_adr_o,
