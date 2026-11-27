@@ -66,9 +66,9 @@
 //            bank 4 SURF: 0 MODE_PAGE 1 PITCH 2,3 -
 //          banks 5..7 reserved (writes ignored).
 // The W<n> names (W48..W63) are the raw operand codes. The named aliases
-// below (XI0, YI0, ...) are *convenience* only: the assembler still needs
-// an explicit MOV BANK, #bank before writing them, because bank is a
-// runtime register, not part of the operand code.
+// (XI0, DXI0, MODE_PAGE0, ..., see ISA_BANKED) are *convenience* only: the
+// program still needs an explicit MOV BANK, #bank before writing them,
+// because bank is a runtime register, not part of the operand code.
 #define ISA_REGS(X) \
     X(R0,0) X(R1,1) X(R2,2) X(R3,3) X(R4,4) X(R5,5) X(R6,6) X(R7,7) \
     X(R8,8) X(R9,9) X(R10,10) X(R11,11) X(R12,12) X(R13,13) X(R14,14) X(R15,15) \
@@ -174,12 +174,36 @@ inline int cond_code(const std::string& s) {
     return -1;
 }
 
+// Named aliases of the banked window (assembler input only; the
+// disassembler prints W48..W63): <name><channel 0..3>, code = 48 +
+// (group << 2) + channel. The bank is NOT part of the code: the program must
+// select it with MOV BANK, #bank before the write.
+#define ISA_BANKED(X) \
+    X(XI, 0, 0)   X(YI, 0, 1)   X(XF, 0, 2)   X(YF, 0, 3) \
+    X(DXI, 1, 0)  X(DYI, 1, 1)  X(DXF, 1, 2)  X(DYF, 1, 3) \
+    X(XMIN, 2, 0) X(YMIN, 2, 1) X(XMAX, 2, 2) X(YMAX, 2, 3) \
+    X(B, 3, 0)    X(KEY, 3, 1)  X(ALU_CTL, 3, 2) \
+    X(MODE_PAGE, 4, 0) X(PITCH, 4, 1)
+
+// Bank of a named alias (-1 if s is not one), for tools that check it.
+inline int banked_alias(const std::string& s, int* bank = nullptr) {
+    if (s.size() < 2) return -1;
+    char ch = s.back();
+    if (ch < '0' || ch > '3') return -1;
+    std::string base = s.substr(0, s.size() - 1);
+#define X(name, bk, grp) \
+    if (base == #name) { if (bank) *bank = bk; return 48 + ((grp) << 2) + (ch - '0'); }
+    ISA_BANKED(X)
+#undef X
+    return -1;
+}
+
 inline int reg_code(const std::string& s) {
     if (s.empty()) return -1;
 #define X(name, val) if (s == #name) return val;
     ISA_REGS(X)
 #undef X
-    return -1;
+    return banked_alias(s);
 }
 
 inline bool alu_valid(int code)  { return alu_name(code)[0]  != '?'; }

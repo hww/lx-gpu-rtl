@@ -42,13 +42,14 @@ int main() {
 
     // ---- 2. things that must be rejected ----
     const char* bad[] = {
-        "ADD IDX0, #1", "MVN IDX0, R1", "MOV BUSY, R1", "MOV MHI, R1", "MOV RSV42, R1",
-        "MOV R1, IDX0", "MOV R1, ROMA", "MOV R1, RSV43",
+        "ADD XI0, #1", "MVN XI0, R1", "MOV BUSY, R1", "MOV MHI, R1", "MOV RSV42, R1",
+        "MOV R1, XI0", "MOV R1, ROMA", "MOV R1, RSV43",
         "MOV DATA0, DATA1", "MOV DATA0, ROML", "MOV ROMH, ROML", "MOV ROMH, ROMH",
         "MOV R1, #2048", "MOV R1, #-1025", "LDI R1, #65536", "LDI R1, #-32769",
-        "MOV IDXH0, #8", "MOV ROMA, #4096", "MOV FLAGS, #16", "MOV PAGE1, #2048", "MOV PAGE1, #-1",
+        "MOV BANK, #8", "MOV ROMA, #4096", "MOV FLAGS, #16", "MOV MODE_PAGE1, #2048",
+        "MOV IDX0, R1", "MOV IDXH0, #0", "MOV STEP0, #1", "MOV PAGE0, R1", "MOV XI4, R1", "MOV DXI, R1",
         "LDI ROMA, #4096", "LDI LOOP_TGT, #5000",
-        "JMP nowhere", "CALL R5", "JMP DATA0", "JMP ROML", "JMP 4096", "JMP -1", "JMP IDX0",
+        "JMP nowhere", "CALL R5", "JMP DATA0", "JMP ROML", "JMP 4096", "JMP -1", "JMP XI0",
         "HALT 128", "IRQ 256", "HALT -1", "HALT foo", "FLUSH 4", "FLUSH", "FLUSH CH4",
         "MOV R1,", "MOV R1, R2, R3", "MOV R1", "FOO R1, R2", "MOV.XX R1, R2", "MOV.EQ.NE R1, R2",
         "RET R1", "NOP 1", "CMP R1, R2 !nf", "MOV R1, R2 !f !nf", "MOV R1, R2 bogus",
@@ -62,14 +63,15 @@ int main() {
     // ---- 3. things that must be accepted ----
     const char* good[] = {
         "MOV ZERO, DATA0", "MOV R1, #2047", "MOV R1, #-1024", "MOV R1, #0x7FF",
-        "MOV IDXH0, #7", "MOV PAGE0, #0x7FF", "MOV ROMA, #2047", "MOV FLAGS, #15",
+        "MOV YI0, #7", "MOV MODE_PAGE0, #0x7FF", "MOV ROMA, #2047", "MOV FLAGS, #15",
         "LDI ROMA, #4095", "LDI R1, #-1", "LDI R1, #65535", "LDI.NE R1, #0b101",
         "MOV ROMH, DATA2", "MOV ROML, DATA2", "MOV DATA3, R1",
         "MOV R1, ROML", "MOV DATA1, R2", "MOV SHADOW, SHADOW", "JMP SHADOW", "JMP R31", "JMP.EQ 4095",
         "HALT", "HALT 127", "IRQ 255", "IRQ", "FLUSH 3", "FLUSH CH0", "flush ch2",
         "CMP R1, R2", "CMP R1, #5", "TST R1, R2", "CALL.PL 0x10", "L ADD.NE R1, #1 !nf",
         "MVN R1, R2", "MUL R1, R2", "SAR R1, #3", "ADD R1, R2 !w", "MOV R1, R2 !f",
-        "MOV IDX3, R1", "MOV STEP0, #-1", "MOV PAGE2, R5",
+        "MOV XI3, R1", "MOV DXI0, #-1", "MOV MODE_PAGE2, R5", "MOV BANK, #4", "MOV R1, BANK",
+        "MOV ALU_CTL1, R2", "MOV KEY3, #0", "LDI PITCH0, #320", "MOV W48, R1", "MOV YMAX2, R7",
         "L JMP.EQ 5", "L JMP R1", "L RET", "L HALT", "JMP.L 5",
     };
     for (auto s : good)
